@@ -40,6 +40,7 @@ class ApplicationSummary(BaseModel):
     job_title: str
     source: str
     current_stage: str
+    status: str = "active"  # active, rejected, hired, completed
     created_at: str
     updated_at: str
 
@@ -81,6 +82,7 @@ class StudentState(BaseModel):
     applications: list[ApplicationSummary]
     unread_personal: int = 0
     unread_work: int = 0
+    blocked_companies: list[str] = []
 
 
 class Message(BaseModel):

@@ -16,6 +16,7 @@ from workready_api.db import (
     create_application,
     create_message,
     get_application,
+    get_blocked_companies,
     get_db,
     get_inbox,
     get_or_create_student,
@@ -24,6 +25,7 @@ from workready_api.db import (
     init_db,
     mark_message_read,
     record_stage_result,
+    set_application_status,
 )
 from workready_api.jobs import get_job, get_job_description, load_jobs
 from workready_api.models import (
@@ -80,6 +82,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --- Helpers ---
+
+
+def _format_bullets(items: list[str], indent: str = "  • ") -> str:
+    """Format a list as a bullet list, returning '(none)' for empty."""
+    if not items:
+        return f"{indent}(none)"
+    return "\n".join(f"{indent}{item}" for item in items)
+
+
+def _format_resume_feedback(feedback: dict, fit_score: int) -> str:
+    """Format the resume assessment feedback as a plain-text block."""
+    return (
+        f"YOUR APPLICATION SUMMARY\n"
+        f"────────────────────────\n"
+        f"Overall fit score: {fit_score}/100\n\n"
+        f"WHAT WORKED WELL\n"
+        f"{_format_bullets(feedback.get('strengths', []))}\n\n"
+        f"AREAS FOR IMPROVEMENT\n"
+        f"{_format_bullets(feedback.get('gaps', []))}\n\n"
+        f"SUGGESTIONS\n"
+        f"{_format_bullets(feedback.get('suggestions', []))}\n\n"
+        f"TAILORING ASSESSMENT\n"
+        f"  {feedback.get('tailoring', '(none)')}"
+    )
 
 
 # --- Health ---
@@ -161,9 +190,12 @@ async def submit_resume(
         related_stage="resume",
     )
 
-    # Personal inbox: outcome message
+    # Personal inbox: outcome message with full feedback inline
     job_meta = get_job(company_slug, job_slug)
     company_name = job_meta["company"] if job_meta else company_slug
+    feedback_dict = result.feedback.model_dump()
+    feedback_block = _format_resume_feedback(feedback_dict, result.fit_score)
+
     if result.proceed_to_interview:
         advance_stage(application_id, "interview")
         create_message(
@@ -176,8 +208,12 @@ async def submit_resume(
                 f"Thank you for your application for the {job_title} role at "
                 f"{company_name}. We were impressed by your application and "
                 f"would like to invite you to an interview.\n\n"
-                f"Please log into your WorkReady portal to schedule your "
-                f"interview at your earliest convenience.\n\n"
+                f"You'll find the interview ready in your WorkReady portal "
+                f"under your dashboard. The interview will be a conversation "
+                f"with the hiring manager and should take around 15 minutes.\n\n"
+                f"Below is a summary of how your application was assessed, "
+                f"so you can prepare with confidence.\n\n"
+                f"{feedback_block}\n\n"
                 f"We look forward to meeting you.\n\n"
                 f"Best regards,\n"
                 f"{company_name} Recruitment"
@@ -187,6 +223,8 @@ async def submit_resume(
             related_stage="interview",
         )
     else:
+        # Mark application as rejected so the company is "off the board"
+        set_application_status(application_id, "rejected")
         create_message(
             student_email=applicant_email,
             sender_name=f"{company_name} HR",
@@ -198,9 +236,10 @@ async def submit_resume(
                 f"{company_name} and for taking the time to submit your "
                 f"application.\n\n"
                 f"After careful consideration, we have decided not to "
-                f"progress your application at this time. We encourage you "
-                f"to review the feedback in your WorkReady portal and apply "
-                f"for other roles that may be a stronger fit.\n\n"
+                f"progress your application at this time. We've included "
+                f"detailed feedback below — review it carefully, then apply "
+                f"for another role that might be a stronger fit.\n\n"
+                f"{feedback_block}\n\n"
                 f"We wish you the best in your career.\n\n"
                 f"Best regards,\n"
                 f"{company_name} Recruitment"
@@ -318,11 +357,13 @@ def get_student_state(email: str) -> StudentState:
 
     applications = get_student_applications(email)
 
-    # Determine state from most recent application
+    # Determine state from the most recent ACTIVE application (if any).
+    # Rejected applications don't drive state — they just block the company.
     state = "NOT_APPLIED"
     active = None
-    if applications:
-        latest = applications[0]
+    active_apps = [a for a in applications if a.get("status", "active") == "active"]
+    if active_apps:
+        latest = active_apps[0]
         active = ApplicationSummary(
             **{k: v for k, v in latest.items() if k != "student_email"}
         )
@@ -351,6 +392,7 @@ def get_student_state(email: str) -> StudentState:
         ],
         unread_personal=unread_personal,
         unread_work=unread_work,
+        blocked_companies=get_blocked_companies(email),
     )
 
 

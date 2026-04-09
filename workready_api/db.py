@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS applications (
     job_title TEXT NOT NULL,
     source TEXT DEFAULT 'direct',
     current_stage TEXT DEFAULT 'resume',
+    status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -49,6 +50,19 @@ CREATE TABLE IF NOT EXISTS stage_results (
     feedback_json TEXT,
     attempt INTEGER DEFAULT 1,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS interview_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id INTEGER NOT NULL REFERENCES applications(id),
+    manager_slug TEXT NOT NULL,
+    manager_name TEXT NOT NULL,
+    transcript_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active',
+    final_score INTEGER,
+    feedback_json TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -74,7 +88,28 @@ CREATE INDEX IF NOT EXISTS idx_stage_results_application
     ON stage_results(application_id, stage);
 CREATE INDEX IF NOT EXISTS idx_messages_student
     ON messages(student_email, inbox);
+CREATE INDEX IF NOT EXISTS idx_interview_sessions_application
+    ON interview_sessions(application_id);
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply any incremental schema migrations to existing databases."""
+    # Add status column to applications if missing (existing databases)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(applications)").fetchall()}
+    if "status" not in cols:
+        conn.execute("ALTER TABLE applications ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        # Backfill: anything past 'resume' is 'active' (still hired/in-progress)
+        # Anything stuck at 'resume' with a failed stage_result becomes 'rejected'
+        conn.execute("""
+            UPDATE applications SET status = 'rejected'
+            WHERE id IN (
+                SELECT a.id FROM applications a
+                JOIN stage_results sr ON sr.application_id = a.id
+                WHERE a.current_stage = 'resume' AND sr.stage = 'resume'
+                  AND sr.status = 'failed'
+            )
+        """)
 
 
 def _now() -> str:
@@ -96,9 +131,10 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
 
 
 def init_db() -> None:
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist and apply incremental migrations."""
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 def get_or_create_student(email: str, name: str) -> dict[str, Any]:
@@ -188,6 +224,31 @@ def advance_stage(application_id: int, next_stage: str) -> None:
         )
 
 
+def set_application_status(application_id: int, status: str) -> None:
+    """Update an application's status (active/rejected/hired/completed)."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE applications SET status = ?, updated_at = ? WHERE id = ?",
+            (status, _now(), application_id),
+        )
+
+
+def get_blocked_companies(student_email: str) -> list[str]:
+    """Return company slugs the student can no longer apply to.
+
+    A company is blocked if the student has any application with status
+    'rejected' for that company. Multiple applications to the same company
+    only count once.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT company_slug FROM applications "
+            "WHERE student_email = ? AND status = 'rejected'",
+            (student_email,),
+        ).fetchall()
+    return [r["company_slug"] for r in rows]
+
+
 def get_application(application_id: int) -> dict[str, Any] | None:
     """Get an application by ID."""
     with get_db() as conn:
@@ -205,6 +266,82 @@ def get_student_applications(email: str) -> list[dict[str, Any]]:
             (email,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def create_interview_session(
+    application_id: int,
+    manager_slug: str,
+    manager_name: str,
+) -> int:
+    """Create a new interview session. Returns session ID."""
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO interview_sessions
+               (application_id, manager_slug, manager_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (application_id, manager_slug, manager_name, now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_interview_session(session_id: int) -> dict[str, Any] | None:
+    """Get an interview session with parsed transcript and feedback."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM interview_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["transcript"] = json.loads(d.get("transcript_json") or "[]")
+    d.pop("transcript_json", None)
+    if d.get("feedback_json"):
+        d["feedback"] = json.loads(d["feedback_json"])
+    else:
+        d["feedback"] = None
+    d.pop("feedback_json", None)
+    return d
+
+
+def append_interview_message(
+    session_id: int,
+    role: str,
+    content: str,
+) -> None:
+    """Append a message to the interview transcript.
+
+    Role is 'assistant' (manager) or 'user' (student).
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT transcript_json FROM interview_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return
+        transcript = json.loads(row["transcript_json"] or "[]")
+        transcript.append({"role": role, "content": content})
+        conn.execute(
+            "UPDATE interview_sessions SET transcript_json = ? WHERE id = ?",
+            (json.dumps(transcript), session_id),
+        )
+
+
+def complete_interview_session(
+    session_id: int,
+    final_score: int,
+    feedback: dict[str, Any],
+) -> None:
+    """Mark an interview session as completed and store the final assessment."""
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE interview_sessions
+               SET status = 'completed', final_score = ?, feedback_json = ?,
+                   completed_at = ?
+               WHERE id = ?""",
+            (final_score, json.dumps(feedback), _now(), session_id),
+        )
 
 
 def create_message(
