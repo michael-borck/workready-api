@@ -11,10 +11,18 @@ _JOB_CACHE: dict[tuple[str, str], dict] = {}
 
 
 def load_jobs(sites_dir: Path, site_slugs: list[str]) -> None:
-    """Load all jobs.json files into the cache."""
+    """Load all jobs.json files into the cache.
+
+    Supports two layouts:
+    - sites_dir/{slug}/jobs.json  (development — site directories)
+    - sites_dir/{slug}.json       (container — flat directory of exports)
+    """
     _JOB_CACHE.clear()
     for slug in site_slugs:
+        # Try site directory layout first, then flat layout
         jobs_file = sites_dir / slug / "jobs.json"
+        if not jobs_file.is_file():
+            jobs_file = sites_dir / f"{slug}.json"
         if not jobs_file.is_file():
             continue
         with open(jobs_file) as f:
