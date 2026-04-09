@@ -51,12 +51,29 @@ CREATE TABLE IF NOT EXISTS stage_results (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_email TEXT NOT NULL REFERENCES students(email),
+    inbox TEXT NOT NULL DEFAULT 'personal',
+    sender_name TEXT NOT NULL,
+    sender_role TEXT,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    application_id INTEGER REFERENCES applications(id),
+    related_stage TEXT,
+    is_read INTEGER DEFAULT 0,
+    deliver_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_applications_student
     ON applications(student_email);
 CREATE INDEX IF NOT EXISTS idx_applications_company_job
     ON applications(company_slug, job_slug);
 CREATE INDEX IF NOT EXISTS idx_stage_results_application
     ON stage_results(application_id, stage);
+CREATE INDEX IF NOT EXISTS idx_messages_student
+    ON messages(student_email, inbox);
 """
 
 
@@ -188,6 +205,64 @@ def get_student_applications(email: str) -> list[dict[str, Any]]:
             (email,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def create_message(
+    student_email: str,
+    sender_name: str,
+    subject: str,
+    body: str,
+    inbox: str = "personal",
+    sender_role: str = "",
+    application_id: int | None = None,
+    related_stage: str | None = None,
+    deliver_at: str | None = None,
+) -> int:
+    """Create an inbox message. Returns the message ID."""
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO messages
+               (student_email, inbox, sender_name, sender_role, subject, body,
+                application_id, related_stage, deliver_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                student_email, inbox, sender_name, sender_role, subject, body,
+                application_id, related_stage, deliver_at or now, now,
+            ),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_inbox(
+    student_email: str,
+    inbox: str = "personal",
+    include_undelivered: bool = False,
+) -> list[dict[str, Any]]:
+    """Get messages in a student's inbox, ordered newest first."""
+    now = _now()
+    with get_db() as conn:
+        if include_undelivered:
+            rows = conn.execute(
+                "SELECT * FROM messages WHERE student_email = ? AND inbox = ? "
+                "ORDER BY deliver_at DESC",
+                (student_email, inbox),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM messages WHERE student_email = ? AND inbox = ? "
+                "AND deliver_at <= ? ORDER BY deliver_at DESC",
+                (student_email, inbox, now),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_message_read(message_id: int) -> None:
+    """Mark a message as read."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE messages SET is_read = 1 WHERE id = ?", (message_id,)
+        )
 
 
 def get_stage_results(application_id: int, stage: str | None = None) -> list[dict[str, Any]]:

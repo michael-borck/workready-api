@@ -69,3 +69,39 @@ class StudentProgress(BaseModel):
     email: str
     name: str
     applications: list[ApplicationSummary]
+
+
+class StudentState(BaseModel):
+    """High-level state for the portal — what the student should see."""
+
+    email: str
+    name: str
+    state: str  # NOT_APPLIED, APPLIED, HIRED, COMPLETED
+    active_application: ApplicationSummary | None = None
+    applications: list[ApplicationSummary]
+    unread_personal: int = 0
+    unread_work: int = 0
+
+
+class Message(BaseModel):
+    """An inbox message."""
+
+    id: int
+    inbox: str
+    sender_name: str
+    sender_role: str | None = ""
+    subject: str
+    body: str
+    application_id: int | None = None
+    related_stage: str | None = None
+    is_read: bool
+    deliver_at: str
+    created_at: str
+
+
+class Inbox(BaseModel):
+    """Inbox contents."""
+
+    inbox: str
+    messages: list[Message]
+    unread_count: int
