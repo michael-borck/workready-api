@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from workready_api.assessor import assess_stub, assess_with_llm
+from workready_api.assessor import assess
 from workready_api.db import (
     advance_stage,
     create_application,
@@ -108,23 +108,13 @@ async def submit_resume(
     # Look up the job description for comparison
     job_description = get_job_description(company_slug, job_slug)
 
-    # Assess
-    use_llm = os.environ.get("USE_LLM", "").lower() in ("1", "true", "yes")
-
-    if use_llm:
-        result = await assess_with_llm(
-            resume_text=resume_text,
-            cover_letter=cover_letter,
-            job_title=job_title,
-            job_description=job_description,
-        )
-    else:
-        result = assess_stub(
-            resume_text=resume_text,
-            cover_letter=cover_letter,
-            job_title=job_title,
-            job_description=job_description,
-        )
+    # Assess using configured provider (stub, ollama, anthropic, openrouter)
+    result = await assess(
+        resume_text=resume_text,
+        cover_letter=cover_letter,
+        job_title=job_title,
+        job_description=job_description,
+    )
 
     # Persist student, application, and stage result
     get_or_create_student(applicant_email, applicant_name)
