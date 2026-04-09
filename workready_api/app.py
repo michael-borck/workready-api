@@ -241,10 +241,63 @@ def get_student_progress(email: str) -> StudentProgress:
     )
 
 
+def _name_from_email(email: str) -> str:
+    """Derive a friendly name from an email address.
+
+    firstname.lastname@curtin.edu.au → Firstname Lastname
+    jdoe@curtin.edu.au → Jdoe
+    """
+    local = email.split("@")[0]
+    parts = local.replace("_", ".").replace("-", ".").split(".")
+    return " ".join(p.capitalize() for p in parts if p)
+
+
+def _send_welcome_email(email: str, name: str) -> None:
+    """Send the welcome email to a newly registered student."""
+    create_message(
+        student_email=email,
+        sender_name="WorkReady Team",
+        sender_role="Curtin University",
+        subject="Welcome to WorkReady — Your Internship Journey Starts Here",
+        body=(
+            f"Hi {name},\n\n"
+            f"Welcome to WorkReady — a simulated internship experience where "
+            f"you can practise the full arc of a real placement, from finding "
+            f"a job through to your exit interview.\n\n"
+            f"This is a safe space to make mistakes and learn from them. "
+            f"Nothing you do here affects your real career.\n\n"
+            f"HOW TO GET STARTED\n\n"
+            f"1. Play the Primer (optional but recommended)\n"
+            f"   A short interactive story that walks you through the six "
+            f"   stages of an internship. About 15 minutes. You can play it "
+            f"   multiple times to explore different paths.\n\n"
+            f"2. Browse seek.jobs\n"
+            f"   Our job board lists internships and graduate roles across "
+            f"   six fictional Western Australian companies. Find one that "
+            f"   interests you and read the job description carefully.\n\n"
+            f"3. Apply for a role\n"
+            f"   When you find a job that fits, submit your resume on the "
+            f"   company's careers page. You'll get feedback on how well "
+            f"   your application matched the role.\n\n"
+            f"4. Watch this inbox\n"
+            f"   You'll receive updates here as your applications progress.\n\n"
+            f"WHAT TO EXPECT\n\n"
+            f"WorkReady is designed to feel real. You may not get the first "
+            f"job you apply for. Feedback might sting. That's the point — "
+            f"you'll be much better prepared when it counts.\n\n"
+            f"Good luck.\n\n"
+            f"— The WorkReady Team\n"
+            f"Curtin University"
+        ),
+        inbox="personal",
+    )
+
+
 @app.get("/api/v1/student/{email}/state", response_model=StudentState)
 def get_student_state(email: str) -> StudentState:
     """Get the high-level state of a student for the portal.
 
+    On first lookup, creates the student record and sends a welcome email.
     Returns the state machine value (NOT_APPLIED, APPLIED, HIRED, COMPLETED),
     active application if any, and unread message counts.
     """
@@ -253,17 +306,15 @@ def get_student_state(email: str) -> StudentState:
             "SELECT * FROM students WHERE email = ?", (email,)
         ).fetchone()
 
+    # First-time sign-in: create student and send welcome email
     if not student:
-        # Auto-create student on first lookup with no applications
-        return StudentState(
-            email=email,
-            name=email.split("@")[0],
-            state="NOT_APPLIED",
-            active_application=None,
-            applications=[],
-            unread_personal=0,
-            unread_work=0,
-        )
+        name = _name_from_email(email)
+        get_or_create_student(email, name)
+        _send_welcome_email(email, name)
+        with get_db() as conn:
+            student = conn.execute(
+                "SELECT * FROM students WHERE email = ?", (email,)
+            ).fetchone()
 
     applications = get_student_applications(email)
 
