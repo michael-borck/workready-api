@@ -15,6 +15,7 @@ from workready_api.blocking import get_blocked_for_student
 from workready_api.db import (
     advance_stage,
     create_application,
+    get_all_postings,
     get_application,
     get_db,
     get_inbox,
@@ -42,6 +43,8 @@ from workready_api.models import (
     BlockedJob,
     Inbox,
     Message,
+    PostingList,
+    PublicPosting,
     StageResult,
     StudentProgress,
     StudentState,
@@ -121,12 +124,104 @@ def _format_resume_feedback(feedback: dict, fit_score: int) -> str:
     )
 
 
+def _revealed_postings_for_student(student_id: int) -> set[int]:
+    """Postings (by id) the student has had a confidential reveal for.
+
+    A confidential posting is "revealed" once the student passes the
+    resume stage on it (interview invitation reveals the company).
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT posting_id FROM applications
+               WHERE student_id = ? AND posting_id IS NOT NULL
+                 AND current_stage != 'resume'""",
+            (student_id,),
+        ).fetchall()
+    return {r["posting_id"] for r in rows if r["posting_id"]}
+
+
+def _build_public_posting(
+    posting: dict,
+    revealed_ids: set[int] | None = None,
+) -> PublicPosting:
+    """Build the public-facing PublicPosting from a DB row + jobs.json data."""
+    company_slug = posting["company_slug"]
+    job_slug = posting["job_slug"]
+    job = get_job(company_slug, job_slug) or {}
+
+    confidential = bool(posting["confidential"])
+    revealed = bool(revealed_ids and posting["id"] in revealed_ids)
+    hide_company = confidential and not revealed
+
+    if hide_company:
+        return PublicPosting(
+            id=posting["id"],
+            source_type=posting["source_type"],
+            agency_name=posting["agency_name"],
+            listing_title=posting["listing_title"],
+            listing_description=posting["listing_description"],
+            confidential=True,
+            # Company-revealing fields nulled out
+            company_slug=None,
+            company_name=None,
+            company_url=None,
+            job_slug=None,
+            job_title=None,
+            department=None,
+            # Safe to expose general location and employment type
+            location=job.get("location"),
+            employment_type=job.get("employment_type"),
+            apply_url=None,
+        )
+
+    return PublicPosting(
+        id=posting["id"],
+        source_type=posting["source_type"],
+        agency_name=posting["agency_name"],
+        listing_title=posting["listing_title"],
+        listing_description=posting["listing_description"],
+        confidential=confidential,
+        company_slug=company_slug,
+        company_name=job.get("company"),
+        company_url=job.get("company_url"),
+        job_slug=job_slug,
+        job_title=job.get("title"),
+        department=job.get("department"),
+        location=job.get("location"),
+        employment_type=job.get("employment_type"),
+        # External apply URL only for direct postings
+        apply_url=job.get("url") if posting["source_type"] == "direct" else None,
+    )
+
+
 # --- Health ---
 
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "version": "0.2.0"}
+
+
+# --- Public job board (for seek.jobs) ---
+
+
+@app.get("/api/v1/postings", response_model=PostingList)
+def list_postings(email: str | None = None) -> PostingList:
+    """List all postings for the public job board.
+
+    If `email` is provided, the response respects which confidential
+    postings the student has had a reveal for. Without email, all
+    confidential postings are anonymised.
+    """
+    revealed_ids: set[int] = set()
+    if email:
+        student = get_student_by_email(email)
+        if student:
+            revealed_ids = _revealed_postings_for_student(student["id"])
+
+    postings = get_all_postings()
+    public = [_build_public_posting(p, revealed_ids) for p in postings]
+    return PostingList(postings=public, total=len(public))
 
 
 # --- Stage 2: Resume submission ---

@@ -80,6 +80,38 @@ class BlockedJob(BaseModel):
     job_slug: str
 
 
+class PublicPosting(BaseModel):
+    """A posting as exposed to seek.jobs and other public consumers.
+
+    Confidential postings have most company-revealing fields nulled out
+    unless the requesting student has revealed the underlying company.
+    """
+
+    id: int
+    source_type: str  # direct | agency
+    agency_name: str | None = None
+    listing_title: str
+    listing_description: str | None = None
+    confidential: bool = False
+    # Company / job details — nulled when confidential and not revealed
+    company_slug: str | None = None
+    company_name: str | None = None
+    company_url: str | None = None
+    job_slug: str | None = None
+    job_title: str | None = None
+    department: str | None = None
+    location: str | None = None
+    employment_type: str | None = None
+    apply_url: str | None = None  # external link, null for confidential
+
+
+class PostingList(BaseModel):
+    """All postings for the job board."""
+
+    postings: list[PublicPosting]
+    total: int
+
+
 class StudentState(BaseModel):
     """High-level state for the portal — what the student should see."""
 
