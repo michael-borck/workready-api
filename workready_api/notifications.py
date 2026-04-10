@@ -64,6 +64,7 @@ class NotifyContent:
     subject: str = ""
     body: str = ""
     application_id: int | None = None
+    booking_id: int | None = None
     related_stage: str | None = None
     deliver_at: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
@@ -190,6 +191,7 @@ def _inapp_handler(student_email: str, content: NotifyContent) -> None:
         body=content.body,
         inbox="personal",
         application_id=content.application_id,
+        booking_id=content.booking_id,
         related_stage=content.related_stage,
         deliver_at=content.deliver_at,
     )

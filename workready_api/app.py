@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
@@ -19,6 +20,7 @@ from workready_api.db import (
     create_application,
     create_booking,
     create_interview_session,
+    delete_pending_messages_for_booking,
     get_active_booking,
     get_all_postings,
     get_application,
@@ -846,6 +848,88 @@ def _format_business_hours_human() -> str:
     return f"{fmt(start_h)}–{fmt(end_h)} {days}"
 
 
+def _create_reminders(
+    booking_id: int,
+    application_id: int,
+    student_email: str,
+    student_name: str,
+    job_title: str,
+    nice_time: str,
+    sender_name: str,
+    sender_role: str,
+    is_confidential: bool,
+    role_at_company: str,
+    scheduled: "datetime",
+) -> None:
+    """Create future-dated reminder messages 24h and 1h before the booking.
+
+    Reminders are tied to booking_id so they can be cancelled together
+    with the booking. Skips reminders that would already be in the past
+    (e.g. 24h reminder for a booking only 4 hours away).
+    """
+    now = scheduling.now_utc()
+    twenty_four_h_before = scheduled - timedelta(hours=24)
+    one_h_before = scheduled - timedelta(hours=1)
+
+    if twenty_four_h_before > now:
+        notify(
+            student_email=student_email,
+            event="interview_invitation",  # closest event for now
+            content=NotifyContent(
+                sender_name=sender_name,
+                sender_role=sender_role,
+                subject=f"Reminder — interview tomorrow ({nice_time})",
+                body=(
+                    f"Dear {student_name or 'Candidate'},\n\n"
+                    f"This is a friendly reminder that your interview for "
+                    f"{role_at_company} is tomorrow at:\n\n"
+                    f"  {nice_time}\n\n"
+                    f"A few things to prepare:\n"
+                    f"  - Have your notes and any questions ready\n"
+                    f"  - Test your internet connection in advance\n"
+                    f"  - Find a quiet space where you won't be interrupted\n"
+                    f"  - Plan to log in 5 minutes early\n\n"
+                    f"Remember: if you're more than "
+                    f"{scheduling.LATE_GRACE_MINUTES} minutes late, you'll "
+                    f"need to reschedule.\n\n"
+                    f"Good luck — we're looking forward to meeting you.\n\n"
+                    f"Best regards,\n"
+                    f"{sender_name}"
+                ),
+                application_id=application_id,
+                booking_id=booking_id,
+                related_stage="interview",
+                deliver_at=scheduling.to_iso(twenty_four_h_before),
+            ),
+        )
+
+    if one_h_before > now:
+        notify(
+            student_email=student_email,
+            event="interview_invitation",
+            content=NotifyContent(
+                sender_name=sender_name,
+                sender_role=sender_role,
+                subject=f"Reminder — interview in 1 hour",
+                body=(
+                    f"Dear {student_name or 'Candidate'},\n\n"
+                    f"Your interview for {role_at_company} starts in about "
+                    f"one hour at {nice_time}.\n\n"
+                    f"Please log into your WorkReady portal and head to the "
+                    f"Interview view a few minutes before the scheduled "
+                    f"start. Click 'Begin Interview' when you're ready.\n\n"
+                    f"You've got this.\n\n"
+                    f"Best regards,\n"
+                    f"{sender_name}"
+                ),
+                application_id=application_id,
+                booking_id=booking_id,
+                related_stage="interview",
+                deliver_at=scheduling.to_iso(one_h_before),
+            ),
+        )
+
+
 def _build_booking_state(application_id: int, app_data: dict) -> BookingState:
     """Compute the current booking state for an application."""
     booking_row = get_active_booking(application_id)
@@ -1078,15 +1162,21 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
     if scheduled < scheduling.now_utc():
         raise HTTPException(status_code=400, detail="Selected time is in the past")
 
-    # Cancel any existing pending booking for this application
+    # Cancel any existing pending booking for this application and clean
+    # up its pending reminder messages so they don't fire on the wrong day
     existing = get_active_booking(application_id)
     if existing:
         update_booking_status(existing["id"], "cancelled")
+        delete_pending_messages_for_booking(existing["id"])
 
     # Create the new booking
     booking_id = create_booking(application_id, req.scheduled_at)
 
-    # Send a confirmation message (immediate, never delayed)
+    # Send a confirmation message (immediate, never delayed).
+    # For agency-mediated bookings the confirmation comes from the agency,
+    # not the company. Confidential listings stay anonymous in the
+    # confirmation — the company is only revealed when the interview
+    # actually starts.
     student_email = app_data.get("student_email", "")
     job_title = app_data.get("job_title", "")
     company_slug = app_data.get("company_slug", "")
@@ -1098,25 +1188,67 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
         if student_email and get_student_by_email(student_email)
         else ""
     )
+
+    # Look up the posting to determine if this was via an agency
+    posting = None
+    posting_id = app_data.get("posting_id")
+    if posting_id:
+        posting = get_posting(posting_id)
+    is_agency = bool(posting and posting.get("source_type") == "agency")
+    is_confidential = bool(posting and posting.get("confidential"))
+    agency_name = posting["agency_name"] if is_agency else None
+    listing_title = posting["listing_title"] if posting else job_title
+
+    # Decide who sends the confirmation and what the body says
+    if is_agency:
+        sender_name = agency_name
+        sender_role = "Recruitment"
+        signoff = agency_name
+    else:
+        sender_name = f"{company_name} HR"
+        sender_role = "Recruitment Team"
+        signoff = f"{company_name} Recruitment"
+
+    # Subject and body adapt to confidentiality
+    display_role = listing_title if is_confidential else job_title
+    role_at_company = (
+        f"the {listing_title} position"
+        if is_confidential
+        else f"the {job_title} role at {company_name}"
+    )
+    meeting_with_line = (
+        "The interview will take place in your WorkReady portal — full details "
+        "of the role and the team will be revealed when you join."
+        if is_confidential
+        else f"You'll be meeting with {manager_name}. The interview will "
+        f"take place in your WorkReady portal."
+    )
+
     local_time = scheduling.to_local(scheduled)
     nice_time = local_time.strftime("%A %d %B %Y at %I:%M %p %Z")
+
+    # Calendar invite link — students can download and add to their calendar
+    api_base = os.environ.get(
+        "WORKREADY_API_PUBLIC_URL", "https://workready-api.eduserver.au"
+    )
+    ics_url = f"{api_base}/api/v1/interview/{application_id}/booking.ics"
 
     notify(
         student_email=student_email,
         event="interview_invitation",  # closest event for now
         content=NotifyContent(
-            sender_name=f"{company_name} HR",
-            sender_role="Recruitment Team",
-            subject=f"Interview confirmed — {job_title} on {local_time.strftime('%a %d %b')}",
+            sender_name=sender_name,
+            sender_role=sender_role,
+            subject=f"Interview confirmed — {display_role} on {local_time.strftime('%a %d %b')}",
             body=(
                 f"Dear {student_name or 'Candidate'},\n\n"
-                f"Your interview for the {job_title} role at {company_name} "
-                f"is confirmed for:\n\n"
+                f"Your interview for {role_at_company} is confirmed for:\n\n"
                 f"  {nice_time}\n\n"
-                f"You'll be meeting with {manager_name}. The interview will "
-                f"take place in your WorkReady portal — please log in a few "
-                f"minutes before your scheduled time and click 'Begin "
-                f"Interview' from the Interview view.\n\n"
+                f"{meeting_with_line} Please log in a few minutes before "
+                f"your scheduled time and click 'Begin Interview' from the "
+                f"Interview view.\n\n"
+                f"Add this appointment to your calendar:\n"
+                f"  {ics_url}\n\n"
                 f"Important: please arrive on time. We can only hold the "
                 f"slot for {scheduling.LATE_GRACE_MINUTES} minutes after the "
                 f"scheduled start. After that you will need to reschedule.\n\n"
@@ -1124,19 +1256,169 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
                 f"WorkReady portal as soon as possible.\n\n"
                 f"We look forward to meeting you.\n\n"
                 f"Best regards,\n"
-                f"{company_name} Recruitment"
+                f"{signoff}"
             ),
             application_id=application_id,
+            booking_id=booking_id,
             related_stage="interview",
         ),
+    )
+
+    # Schedule reminder messages (24h and 1h before the interview).
+    # These sit invisible in the inbox until their deliver_at arrives.
+    _create_reminders(
+        booking_id=booking_id,
+        application_id=application_id,
+        student_email=student_email,
+        student_name=student_name,
+        job_title=display_role,
+        nice_time=nice_time,
+        sender_name=sender_name,
+        sender_role=sender_role,
+        is_confidential=is_confidential,
+        role_at_company=role_at_company,
+        scheduled=scheduled,
     )
 
     return _build_booking_state(application_id, app_data)
 
 
+def _build_ics(
+    booking: dict,
+    job_title: str,
+    company_name: str,
+    manager_name: str,
+    sender_name: str,
+    portal_url: str = "https://workready.eduserver.au",
+) -> str:
+    """Build an RFC 5545 .ics calendar invite for an interview booking.
+
+    Returns a string with the iCalendar content. Uses a deterministic UID
+    derived from the booking_id so calendar updates work if the booking
+    is rescheduled (same UID, new DTSTART → calendar shows it as moved).
+    """
+    scheduled = scheduling.from_iso(booking["scheduled_at"])
+    end = scheduled + timedelta(minutes=scheduling.SLOT_DURATION_MINUTES)
+    now_stamp = scheduling.now_utc().strftime("%Y%m%dT%H%M%SZ")
+    dtstart = scheduled.strftime("%Y%m%dT%H%M%SZ")
+    dtend = end.strftime("%Y%m%dT%H%M%SZ")
+    uid = f"workready-booking-{booking['id']}@workready.eduserver.au"
+
+    summary = f"Interview: {job_title} at {company_name}"
+    description = (
+        f"Job interview for the {job_title} role at {company_name}. "
+        f"You will be interviewed by {manager_name}. "
+        f"The interview takes place in your WorkReady portal at {portal_url} — "
+        f"please log in a few minutes early and click 'Begin Interview'. "
+        f"You must arrive within {scheduling.LATE_GRACE_MINUTES} minutes of "
+        f"the scheduled start or your slot will be forfeited."
+    )
+    # iCalendar requires CRLF line endings and 75-octet line folding.
+    # For simplicity we keep our lines short enough not to need folding.
+
+    def _escape(text: str) -> str:
+        return (
+            text.replace("\\", "\\\\")
+            .replace(",", "\\,")
+            .replace(";", "\\;")
+            .replace("\n", "\\n")
+        )
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//WorkReady//Interview Booking//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:REQUEST",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{now_stamp}",
+        f"DTSTART:{dtstart}",
+        f"DTEND:{dtend}",
+        f"SUMMARY:{_escape(summary)}",
+        f"DESCRIPTION:{_escape(description)}",
+        f"LOCATION:{_escape('WorkReady Portal — ' + portal_url)}",
+        f"ORGANIZER;CN={_escape(sender_name)}:mailto:noreply@workready.eduserver.au",
+        "STATUS:CONFIRMED",
+        "TRANSP:OPAQUE",
+        "BEGIN:VALARM",
+        "ACTION:DISPLAY",
+        f"DESCRIPTION:{_escape('Interview reminder — ' + summary)}",
+        "TRIGGER:-PT15M",
+        "END:VALARM",
+        "BEGIN:VALARM",
+        "ACTION:DISPLAY",
+        f"DESCRIPTION:{_escape('Interview starts in 5 minutes')}",
+        "TRIGGER:-PT5M",
+        "END:VALARM",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+@app.get("/api/v1/interview/{application_id}/booking.ics")
+def get_booking_ics(application_id: int) -> Response:
+    """Return the .ics calendar invite for the current pending booking.
+
+    Students download this and double-click to add the interview to their
+    personal calendar (Google, Apple, Outlook all support .ics imports).
+    """
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    booking = get_active_booking(application_id)
+    if not booking:
+        raise HTTPException(status_code=404, detail="No active booking")
+
+    company_slug = app_data.get("company_slug", "")
+    job = get_job(company_slug, app_data.get("job_slug", "")) or {}
+    company_name = job.get("company", company_slug)
+    manager_name = job.get("reports_to", "the hiring manager")
+    job_title = app_data.get("job_title", "")
+
+    # Determine the sender (agency or company) based on the posting
+    posting_id = app_data.get("posting_id")
+    posting = get_posting(posting_id) if posting_id else None
+    is_agency = bool(posting and posting.get("source_type") == "agency")
+    is_confidential = bool(posting and posting.get("confidential"))
+
+    if is_agency:
+        sender_name = posting["agency_name"]
+        # Confidential listings hide both company and manager in the calendar
+        if is_confidential:
+            company_name = "Confidential client"
+            manager_name = "the hiring manager"
+            job_title = posting["listing_title"]
+    else:
+        sender_name = f"{company_name} HR"
+
+    ics = _build_ics(
+        booking=booking,
+        job_title=job_title,
+        company_name=company_name,
+        manager_name=manager_name,
+        sender_name=sender_name,
+    )
+
+    filename = f"workready-interview-{booking['id']}.ics"
+    return Response(
+        content=ics,
+        media_type="text/calendar; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
 @app.post("/api/v1/interview/{application_id}/cancel-booking", response_model=BookingState)
 def cancel_booking(application_id: int) -> BookingState:
-    """Cancel the current pending booking (so the student can rebook)."""
+    """Cancel the current pending booking (so the student can rebook).
+
+    Also deletes any pending reminder messages tied to this booking so
+    they don't fire on the now-cancelled appointment.
+    """
     app_data = get_application(application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -1144,6 +1426,7 @@ def cancel_booking(application_id: int) -> BookingState:
     booking = get_active_booking(application_id)
     if booking:
         update_booking_status(booking["id"], "cancelled")
+        delete_pending_messages_for_booking(booking["id"])
 
     return _build_booking_state(application_id, app_data)
 

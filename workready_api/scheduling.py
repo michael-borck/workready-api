@@ -85,6 +85,62 @@ INTERVIEW_INVITATION_DELAY_MINUTES: int = _env_int(
 )
 
 
+# --- Public holidays ---
+
+# Default WA public holidays (and substitute days where applicable).
+# Lecturers can override the entire list via the PUBLIC_HOLIDAYS env var
+# (comma-separated YYYY-MM-DD strings) or extend by appending after parsing.
+DEFAULT_PUBLIC_HOLIDAYS: list[str] = [
+    # 2026
+    "2026-01-01",  # New Year's Day (Thu)
+    "2026-01-26",  # Australia Day (Mon)
+    "2026-03-02",  # Labour Day (1st Mon March)
+    "2026-04-03",  # Good Friday
+    "2026-04-04",  # Easter Saturday
+    "2026-04-05",  # Easter Sunday
+    "2026-04-06",  # Easter Monday
+    "2026-04-25",  # ANZAC Day (Sat)
+    "2026-04-27",  # ANZAC Day substitute (Mon)
+    "2026-06-01",  # WA Day (1st Mon June)
+    "2026-09-28",  # King's Birthday WA (last Mon Sep)
+    "2026-12-25",  # Christmas Day (Fri)
+    "2026-12-26",  # Boxing Day (Sat)
+    "2026-12-28",  # Boxing Day substitute (Mon)
+    # 2027
+    "2027-01-01",  # New Year's Day (Fri)
+    "2027-01-26",  # Australia Day (Tue)
+    "2027-03-01",  # Labour Day (1st Mon March)
+    "2027-03-26",  # Good Friday
+    "2027-03-27",  # Easter Saturday
+    "2027-03-28",  # Easter Sunday
+    "2027-03-29",  # Easter Monday
+    "2027-04-25",  # ANZAC Day (Sun)
+    "2027-04-26",  # ANZAC Day substitute (Mon)
+    "2027-06-07",  # WA Day (1st Mon June)
+    "2027-09-27",  # King's Birthday WA
+    "2027-12-25",  # Christmas Day (Sat)
+    "2027-12-27",  # Christmas Day substitute (Mon)
+    "2027-12-28",  # Boxing Day substitute (Tue)
+]
+
+
+def _parse_holidays() -> set[str]:
+    """Resolve the active public holiday list (env override or default)."""
+    raw = os.environ.get("PUBLIC_HOLIDAYS", "").strip()
+    if raw:
+        return {d.strip() for d in raw.split(",") if d.strip()}
+    return set(DEFAULT_PUBLIC_HOLIDAYS)
+
+
+PUBLIC_HOLIDAYS: set[str] = _parse_holidays()
+
+
+def is_public_holiday(dt: datetime) -> bool:
+    """True if dt (local) falls on a configured public holiday."""
+    local = to_local(dt)
+    return local.strftime("%Y-%m-%d") in PUBLIC_HOLIDAYS
+
+
 # --- Datetime helpers ---
 
 
@@ -139,10 +195,17 @@ def feedback_delivery_time(base_delay_minutes: int, jitter_minutes: int = 0) -> 
 
 
 def is_business_day(dt: datetime) -> bool:
-    """True if dt (local) is a configured business day. Mon=1 ... Sun=7."""
+    """True if dt (local) is a configured business day and not a public holiday.
+
+    Mon=1 ... Sun=7
+    """
     local = to_local(dt)
     iso_weekday = local.isoweekday()  # 1=Mon ... 7=Sun
-    return iso_weekday in BUSINESS_DAYS
+    if iso_weekday not in BUSINESS_DAYS:
+        return False
+    if is_public_holiday(local):
+        return False
+    return True
 
 
 def is_business_hour(dt: datetime) -> bool:

@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS messages (
     subject TEXT NOT NULL,
     body TEXT NOT NULL,
     application_id INTEGER REFERENCES applications(id),
+    booking_id INTEGER REFERENCES interview_bookings(id),
     related_stage TEXT,
     is_read INTEGER DEFAULT 0,
     deliver_at TEXT NOT NULL,
@@ -227,6 +228,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE applications ADD COLUMN missed_interviews "
             "INTEGER NOT NULL DEFAULT 0"
+        )
+
+    # --- Migration 5: messages.booking_id ---
+    msg_cols = _table_columns(conn, "messages")
+    if "booking_id" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN booking_id INTEGER "
+            "REFERENCES interview_bookings(id)"
         )
 
     # --- Migration 4: messages.student_id (replacing student_email FK) ---
@@ -714,11 +723,14 @@ def create_message(
     related_stage: str | None = None,
     deliver_at: str | None = None,
     student_email: str | None = None,
+    booking_id: int | None = None,
 ) -> int:
     """Create an inbox message. Returns the message ID.
 
     student_email is kept as a denormalised column for legacy compatibility
-    and is auto-resolved if not provided.
+    and is auto-resolved if not provided. booking_id ties the message to
+    a specific interview booking (used for reminder messages so they can
+    be cancelled if the booking is cancelled).
     """
     now = _now()
     if student_email is None:
@@ -729,15 +741,32 @@ def create_message(
         cursor = conn.execute(
             """INSERT INTO messages
                (student_id, student_email, inbox, sender_name, sender_role,
-                subject, body, application_id, related_stage, deliver_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                subject, body, application_id, booking_id, related_stage,
+                deliver_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 student_id, student_email, inbox, sender_name, sender_role,
-                subject, body, application_id, related_stage,
+                subject, body, application_id, booking_id, related_stage,
                 deliver_at or now, now,
             ),
         )
         return cursor.lastrowid  # type: ignore[return-value]
+
+
+def delete_pending_messages_for_booking(booking_id: int) -> int:
+    """Delete future-dated messages tied to a booking. Returns count deleted.
+
+    Used when a booking is cancelled — pending reminders for that booking
+    should not fire on the new appointment time. Past messages (already
+    delivered) are kept for the historical record.
+    """
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM messages WHERE booking_id = ? AND deliver_at > ?",
+            (booking_id, now),
+        )
+        return cursor.rowcount
 
 
 def get_inbox(
