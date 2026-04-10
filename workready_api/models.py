@@ -40,6 +40,7 @@ class ApplicationSummary(BaseModel):
     job_title: str
     source: str
     current_stage: str
+    current_interview_step: int = 0
     status: str = "active"  # active, rejected, hired, completed
     created_at: str
     updated_at: str

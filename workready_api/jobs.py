@@ -47,3 +47,32 @@ def get_job_description(company_slug: str, job_slug: str) -> str:
     if not job:
         return ""
     return job.get("description", "")
+
+
+def get_interview_pipeline(company_slug: str, job_slug: str) -> list[dict]:
+    """Get the interview pipeline for a job.
+
+    Returns the pipeline declared in jobs.json, or a default single-stage
+    pipeline using the job's `reports_to` field as the manager.
+
+    Pipeline format:
+        [
+            {"type": "manager", "with": "marcus-webb"},
+            {"type": "technical", "with": "liam-foster", "format": "..."},
+            {"type": "panel", "with": ["alex-nguyen", "marcus-webb"]},
+        ]
+
+    Supported types: manager, hr_screen, technical, panel, reference
+    The MVP only uses 'manager' but the data model supports all of them.
+    """
+    job = get_job(company_slug, job_slug)
+    if not job:
+        return []
+
+    pipeline = job.get("interview_pipeline")
+    if pipeline:
+        return pipeline
+
+    # Default: single-stage interview with the job's reports_to manager
+    reports_to = job.get("reports_to") or job.get("manager_slug") or ""
+    return [{"type": "manager", "with": reports_to}]

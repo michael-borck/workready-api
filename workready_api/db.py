@@ -21,21 +21,27 @@ STAGES = [
     "exit_interview",  # Stage 6: the exit interview
 ]
 
-SCHEMA = """
+# Tables only — safe to run before migrations on legacy DBs because all
+# CREATE TABLE statements use IF NOT EXISTS. Indexes are split out so they
+# can run after migrations have added any missing columns.
+TABLES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
-    email TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS applications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_email TEXT NOT NULL REFERENCES students(email),
+    student_id INTEGER NOT NULL REFERENCES students(id),
+    student_email TEXT NOT NULL,
     company_slug TEXT NOT NULL,
     job_slug TEXT NOT NULL,
     job_title TEXT NOT NULL,
     source TEXT DEFAULT 'direct',
     current_stage TEXT DEFAULT 'resume',
+    current_interview_step INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -67,7 +73,8 @@ CREATE TABLE IF NOT EXISTS interview_sessions (
 
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_email TEXT NOT NULL REFERENCES students(email),
+    student_id INTEGER NOT NULL REFERENCES students(id),
+    student_email TEXT NOT NULL,
     inbox TEXT NOT NULL DEFAULT 'personal',
     sender_name TEXT NOT NULL,
     sender_role TEXT,
@@ -79,28 +86,38 @@ CREATE TABLE IF NOT EXISTS messages (
     deliver_at TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+"""
 
+# Indexes — run AFTER migrations so any newly added columns exist
+INDEXES_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_students_email
+    ON students(email);
 CREATE INDEX IF NOT EXISTS idx_applications_student
-    ON applications(student_email);
+    ON applications(student_id);
 CREATE INDEX IF NOT EXISTS idx_applications_company_job
     ON applications(company_slug, job_slug);
 CREATE INDEX IF NOT EXISTS idx_stage_results_application
     ON stage_results(application_id, stage);
 CREATE INDEX IF NOT EXISTS idx_messages_student
-    ON messages(student_email, inbox);
+    ON messages(student_id, inbox);
 CREATE INDEX IF NOT EXISTS idx_interview_sessions_application
     ON interview_sessions(application_id);
 """
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Apply any incremental schema migrations to existing databases."""
-    # Add status column to applications if missing (existing databases)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(applications)").fetchall()}
-    if "status" not in cols:
+    """Apply any incremental schema migrations to existing databases.
+
+    Migrations are idempotent — they check for state before applying.
+    """
+    # --- Migration 1: applications.status column ---
+    app_cols = _table_columns(conn, "applications")
+    if "status" not in app_cols:
         conn.execute("ALTER TABLE applications ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
-        # Backfill: anything past 'resume' is 'active' (still hired/in-progress)
-        # Anything stuck at 'resume' with a failed stage_result becomes 'rejected'
         conn.execute("""
             UPDATE applications SET status = 'rejected'
             WHERE id IN (
@@ -110,6 +127,75 @@ def _migrate(conn: sqlite3.Connection) -> None:
                   AND sr.status = 'failed'
             )
         """)
+        app_cols = _table_columns(conn, "applications")
+
+    # --- Migration 2: students.id integer primary key ---
+    # Detect old schema (email is PK, no id column)
+    student_cols = _table_columns(conn, "students")
+    if "id" not in student_cols:
+        # Old schema: email is the PK. Need to rebuild the table with id PK,
+        # then update all FK references in applications and messages.
+        conn.execute("""
+            CREATE TABLE students_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            INSERT INTO students_new (email, name, created_at)
+            SELECT email, name, created_at FROM students
+        """)
+        conn.execute("DROP TABLE students")
+        conn.execute("ALTER TABLE students_new RENAME TO students")
+
+    # --- Migration 3: applications.student_id (replacing student_email FK) ---
+    app_cols = _table_columns(conn, "applications")
+    if "student_id" not in app_cols:
+        conn.execute("ALTER TABLE applications ADD COLUMN student_id INTEGER REFERENCES students(id)")
+        conn.execute("""
+            UPDATE applications SET student_id = (
+                SELECT id FROM students WHERE students.email = applications.student_email
+            )
+        """)
+        # Verify all rows got a student_id (or there were no rows)
+        unmapped = conn.execute(
+            "SELECT COUNT(*) FROM applications WHERE student_id IS NULL"
+        ).fetchone()[0]
+        if unmapped > 0:
+            raise RuntimeError(
+                f"Migration error: {unmapped} applications could not be mapped "
+                "to a student_id. Refusing to drop student_email column."
+            )
+
+    # --- Migration 4a: applications.current_interview_step ---
+    if "current_interview_step" not in app_cols:
+        conn.execute(
+            "ALTER TABLE applications ADD COLUMN current_interview_step "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+
+    # --- Migration 4: messages.student_id (replacing student_email FK) ---
+    msg_cols = _table_columns(conn, "messages")
+    if "student_id" not in msg_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN student_id INTEGER REFERENCES students(id)")
+        conn.execute("""
+            UPDATE messages SET student_id = (
+                SELECT id FROM students WHERE students.email = messages.student_email
+            )
+        """)
+        unmapped = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE student_id IS NULL"
+        ).fetchone()[0]
+        if unmapped > 0:
+            raise RuntimeError(
+                f"Migration error: {unmapped} messages could not be mapped to student_id."
+            )
+
+    # Note: we keep the old student_email columns for backwards compatibility.
+    # They are no longer authoritative — the new code reads/writes student_id.
+    # A future cleanup migration can drop them once we're confident.
 
 
 def _now() -> str:
@@ -131,50 +217,87 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
 
 
 def init_db() -> None:
-    """Create tables if they don't exist and apply incremental migrations."""
+    """Create tables, apply migrations, then create indexes.
+
+    Order matters: tables (legacy-safe IF NOT EXISTS) → migrations
+    (add columns to existing tables) → indexes (need final columns).
+    """
     with get_db() as conn:
-        conn.executescript(SCHEMA)
+        conn.executescript(TABLES_SCHEMA)
         _migrate(conn)
+        conn.executescript(INDEXES_SCHEMA)
+
+
+def get_student_by_email(email: str) -> dict[str, Any] | None:
+    """Look up a student by email. Returns dict with id/email/name/created_at."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, email, name, created_at FROM students WHERE email = ?",
+            (email,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_student_by_id(student_id: int) -> dict[str, Any] | None:
+    """Look up a student by internal id."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, email, name, created_at FROM students WHERE id = ?",
+            (student_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def get_or_create_student(email: str, name: str) -> dict[str, Any]:
-    """Get existing student or create a new one."""
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM students WHERE email = ?", (email,)
-        ).fetchone()
-        if row:
-            # Update name if changed
-            if row["name"] != name:
+    """Get existing student or create a new one. Returns dict with id."""
+    existing = get_student_by_email(email)
+    if existing:
+        if existing["name"] != name:
+            with get_db() as conn:
                 conn.execute(
-                    "UPDATE students SET name = ? WHERE email = ?",
-                    (name, email),
+                    "UPDATE students SET name = ? WHERE id = ?",
+                    (name, existing["id"]),
                 )
-            return dict(row)
+                existing["name"] = name
+        return existing
 
-        conn.execute(
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
             "INSERT INTO students (email, name, created_at) VALUES (?, ?, ?)",
-            (email, name, _now()),
+            (email, name, now),
         )
-        return {"email": email, "name": name, "created_at": _now()}
+        student_id = cursor.lastrowid
+    return {"id": student_id, "email": email, "name": name, "created_at": now}
 
 
 def create_application(
-    student_email: str,
+    student_id: int,
     company_slug: str,
     job_slug: str,
     job_title: str,
     source: str = "direct",
+    student_email: str | None = None,
 ) -> int:
-    """Create a new application record. Returns the application ID."""
+    """Create a new application record. Returns the application ID.
+
+    student_email is kept as a denormalised column for backwards compatibility
+    with the legacy schema. New code should treat student_id as authoritative.
+    """
     now = _now()
+    # Look up email for the legacy column if not provided
+    if student_email is None:
+        student = get_student_by_id(student_id)
+        student_email = student["email"] if student else ""
+
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO applications
-               (student_email, company_slug, job_slug, job_title, source,
-                current_stage, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 'resume', ?, ?)""",
-            (student_email, company_slug, job_slug, job_title, source, now, now),
+               (student_id, student_email, company_slug, job_slug, job_title,
+                source, current_stage, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'resume', ?, ?)""",
+            (student_id, student_email, company_slug, job_slug, job_title,
+             source, now, now),
         )
         return cursor.lastrowid  # type: ignore[return-value]
 
@@ -233,7 +356,7 @@ def set_application_status(application_id: int, status: str) -> None:
         )
 
 
-def get_blocked_companies(student_email: str) -> list[str]:
+def get_blocked_companies(student_id: int) -> list[str]:
     """Return company slugs the student can no longer apply to.
 
     A company is blocked if the student has any application with status
@@ -243,8 +366,8 @@ def get_blocked_companies(student_email: str) -> list[str]:
     with get_db() as conn:
         rows = conn.execute(
             "SELECT DISTINCT company_slug FROM applications "
-            "WHERE student_email = ? AND status = 'rejected'",
-            (student_email,),
+            "WHERE student_id = ? AND status = 'rejected'",
+            (student_id,),
         ).fetchall()
     return [r["company_slug"] for r in rows]
 
@@ -258,12 +381,12 @@ def get_application(application_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
-def get_student_applications(email: str) -> list[dict[str, Any]]:
-    """Get all applications for a student."""
+def get_student_applications(student_id: int) -> list[dict[str, Any]]:
+    """Get all applications for a student, newest first."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT * FROM applications WHERE student_email = ? ORDER BY created_at DESC",
-            (email,),
+            "SELECT * FROM applications WHERE student_id = ? ORDER BY created_at DESC",
+            (student_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -345,7 +468,7 @@ def complete_interview_session(
 
 
 def create_message(
-    student_email: str,
+    student_id: int,
     sender_name: str,
     subject: str,
     body: str,
@@ -354,25 +477,35 @@ def create_message(
     application_id: int | None = None,
     related_stage: str | None = None,
     deliver_at: str | None = None,
+    student_email: str | None = None,
 ) -> int:
-    """Create an inbox message. Returns the message ID."""
+    """Create an inbox message. Returns the message ID.
+
+    student_email is kept as a denormalised column for legacy compatibility
+    and is auto-resolved if not provided.
+    """
     now = _now()
+    if student_email is None:
+        student = get_student_by_id(student_id)
+        student_email = student["email"] if student else ""
+
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO messages
-               (student_email, inbox, sender_name, sender_role, subject, body,
-                application_id, related_stage, deliver_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (student_id, student_email, inbox, sender_name, sender_role,
+                subject, body, application_id, related_stage, deliver_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                student_email, inbox, sender_name, sender_role, subject, body,
-                application_id, related_stage, deliver_at or now, now,
+                student_id, student_email, inbox, sender_name, sender_role,
+                subject, body, application_id, related_stage,
+                deliver_at or now, now,
             ),
         )
         return cursor.lastrowid  # type: ignore[return-value]
 
 
 def get_inbox(
-    student_email: str,
+    student_id: int,
     inbox: str = "personal",
     include_undelivered: bool = False,
 ) -> list[dict[str, Any]]:
@@ -381,15 +514,15 @@ def get_inbox(
     with get_db() as conn:
         if include_undelivered:
             rows = conn.execute(
-                "SELECT * FROM messages WHERE student_email = ? AND inbox = ? "
+                "SELECT * FROM messages WHERE student_id = ? AND inbox = ? "
                 "ORDER BY deliver_at DESC",
-                (student_email, inbox),
+                (student_id, inbox),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM messages WHERE student_email = ? AND inbox = ? "
+                "SELECT * FROM messages WHERE student_id = ? AND inbox = ? "
                 "AND deliver_at <= ? ORDER BY deliver_at DESC",
-                (student_email, inbox, now),
+                (student_id, inbox, now),
             ).fetchall()
         return [dict(r) for r in rows]
 
