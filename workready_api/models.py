@@ -112,6 +112,50 @@ class PostingList(BaseModel):
     total: int
 
 
+# --- Interview (Stage 3) ---
+
+
+class InterviewMessage(BaseModel):
+    """A single message in an interview transcript."""
+
+    role: str  # "assistant" (manager) or "user" (student)
+    content: str
+
+
+class InterviewSession(BaseModel):
+    """An active interview session."""
+
+    session_id: int
+    application_id: int
+    manager_name: str
+    manager_role: str
+    company_name: str
+    job_title: str
+    transcript: list[InterviewMessage]
+    turn: int
+    target_turns: int
+    status: str  # "active" | "completed"
+    feedback: dict | None = None
+    final_score: int | None = None
+
+
+class InterviewStartRequest(BaseModel):
+    application_id: int
+
+
+class InterviewMessageRequest(BaseModel):
+    session_id: int
+    message: str
+
+
+class InterviewMessageReply(BaseModel):
+    session_id: int
+    reply: str
+    turn: int
+    target_turns: int
+    suggested_wrap_up: bool
+
+
 class StudentState(BaseModel):
     """High-level state for the portal — what the student should see."""
 

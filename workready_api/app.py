@@ -14,11 +14,15 @@ from workready_api.assessor import assess
 from workready_api.blocking import get_blocked_for_student
 from workready_api.db import (
     advance_stage,
+    append_interview_message,
+    complete_interview_session,
     create_application,
+    create_interview_session,
     get_all_postings,
     get_application,
     get_db,
     get_inbox,
+    get_interview_session,
     get_or_create_student,
     get_posting,
     get_stage_results,
@@ -28,6 +32,13 @@ from workready_api.db import (
     mark_message_read,
     record_stage_result,
     set_application_status,
+)
+from workready_api.interview import (
+    TARGET_TURNS,
+    WRAP_UP_AFTER,
+    assess_interview,
+    build_interview_system_prompt,
+    chat_completion,
 )
 from workready_api.jobs import (
     get_job,
@@ -42,6 +53,11 @@ from workready_api.models import (
     AssessmentResult,
     BlockedJob,
     Inbox,
+    InterviewMessage,
+    InterviewMessageReply,
+    InterviewMessageRequest,
+    InterviewSession,
+    InterviewStartRequest,
     Message,
     PostingList,
     PublicPosting,
@@ -604,10 +620,306 @@ def get_application_detail(application_id: int) -> ApplicationDetail:
 
     return ApplicationDetail(
         application=ApplicationSummary(
-            **{k: v for k, v in app_data.items() if k != "student_email"}
+            **{k: v for k, v in app_data.items() if k not in ("student_email", "student_id")}
         ),
         stages=[
             StageResult(**s)
             for s in stages
         ],
     )
+
+
+# --- Stage 3: Interview ---
+
+
+def _session_to_model(session: dict) -> InterviewSession:
+    """Convert a DB session row + parsed transcript into an API model."""
+    transcript = [InterviewMessage(**m) for m in (session.get("transcript") or [])]
+    turn = sum(1 for m in transcript if m.role == "user")
+    # Look up extra context for display (job title, company, manager role)
+    app_data = get_application(session["application_id"]) or {}
+    job = get_job(app_data.get("company_slug", ""), app_data.get("job_slug", "")) or {}
+    return InterviewSession(
+        session_id=session["id"],
+        application_id=session["application_id"],
+        manager_name=session["manager_name"],
+        manager_role=_extract_manager_role(session.get("manager_name", ""), job),
+        company_name=job.get("company", ""),
+        job_title=app_data.get("job_title", ""),
+        transcript=transcript,
+        turn=turn,
+        target_turns=TARGET_TURNS,
+        status=session["status"],
+        feedback=session.get("feedback"),
+        final_score=session.get("final_score"),
+    )
+
+
+def _extract_manager_role(manager_name: str, job: dict) -> str:
+    """Best-effort lookup of the manager's role from the job context."""
+    persona = job.get("manager_persona", "")
+    # Persona starts with "You are <Name>, <Role> at <Company>."
+    if persona.startswith("You are "):
+        try:
+            after_name = persona.split(",", 1)[1].split(" at ")[0]
+            return after_name.strip()
+        except (IndexError, ValueError):
+            return ""
+    return ""
+
+
+@app.post("/api/v1/interview/start", response_model=InterviewSession)
+async def interview_start(req: InterviewStartRequest) -> InterviewSession:
+    """Start an interview session for an application that's in the interview stage."""
+    app_data = get_application(req.application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if app_data["current_stage"] != "interview":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Application is at stage '{app_data['current_stage']}', not 'interview'",
+        )
+    if app_data["status"] != "active":
+        raise HTTPException(status_code=400, detail="Application is not active")
+
+    # Look up the job and resolve the manager (from interview pipeline)
+    company_slug = app_data["company_slug"]
+    job_slug = app_data["job_slug"]
+    job = get_job(company_slug, job_slug)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    manager_persona = job.get("manager_persona", "")
+    manager_name = job.get("reports_to", "Hiring Manager")
+    company_name = job.get("company", company_slug)
+
+    # Look up the most recent resume score for context
+    resume_results = get_stage_results(req.application_id, "resume")
+    resume_score = None
+    resume_strengths: list[str] = []
+    resume_gaps: list[str] = []
+    if resume_results:
+        latest = resume_results[-1]
+        resume_score = latest.get("score")
+        feedback = latest.get("feedback") or {}
+        resume_strengths = feedback.get("strengths", [])
+        resume_gaps = feedback.get("gaps", [])
+
+    # Build the system prompt
+    system_prompt = build_interview_system_prompt(
+        manager_persona=manager_persona,
+        job_title=app_data["job_title"],
+        company_name=company_name,
+        job_description=job.get("description", ""),
+        resume_score=resume_score,
+        resume_strengths=resume_strengths,
+        resume_gaps=resume_gaps,
+    )
+
+    # Create the session
+    session_id = create_interview_session(
+        application_id=req.application_id,
+        manager_slug=manager_name.lower().replace(" ", "-"),
+        manager_name=manager_name,
+    )
+
+    # Get the opening message from the LLM
+    opening = await chat_completion(system_prompt, [])
+    append_interview_message(session_id, "assistant", opening)
+
+    # Store the system prompt in the session for subsequent turns
+    # (we re-build it on each turn for simplicity rather than storing it)
+
+    session = get_interview_session(session_id)
+    return _session_to_model(session)
+
+
+@app.post("/api/v1/interview/message", response_model=InterviewMessageReply)
+async def interview_message(req: InterviewMessageRequest) -> InterviewMessageReply:
+    """Send a student message and get the manager's reply."""
+    session = get_interview_session(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    # Append the student's message to the transcript
+    append_interview_message(req.session_id, "user", req.message.strip())
+
+    # Re-build the system prompt with the current application context
+    app_data = get_application(session["application_id"]) or {}
+    job = get_job(app_data.get("company_slug", ""), app_data.get("job_slug", "")) or {}
+    resume_results = get_stage_results(session["application_id"], "resume")
+    resume_score = None
+    resume_strengths: list[str] = []
+    resume_gaps: list[str] = []
+    if resume_results:
+        latest = resume_results[-1]
+        resume_score = latest.get("score")
+        feedback = latest.get("feedback") or {}
+        resume_strengths = feedback.get("strengths", [])
+        resume_gaps = feedback.get("gaps", [])
+
+    system_prompt = build_interview_system_prompt(
+        manager_persona=job.get("manager_persona", ""),
+        job_title=app_data.get("job_title", ""),
+        company_name=job.get("company", ""),
+        job_description=job.get("description", ""),
+        resume_score=resume_score,
+        resume_strengths=resume_strengths,
+        resume_gaps=resume_gaps,
+    )
+
+    # Reload session to get updated transcript and send to LLM
+    session = get_interview_session(req.session_id)
+    transcript = session.get("transcript", [])
+    reply = await chat_completion(system_prompt, transcript)
+    append_interview_message(req.session_id, "assistant", reply)
+
+    # Calculate turn count
+    final_session = get_interview_session(req.session_id)
+    turn = sum(1 for m in final_session.get("transcript", []) if m["role"] == "user")
+
+    return InterviewMessageReply(
+        session_id=req.session_id,
+        reply=reply,
+        turn=turn,
+        target_turns=TARGET_TURNS,
+        suggested_wrap_up=turn >= WRAP_UP_AFTER,
+    )
+
+
+@app.post("/api/v1/interview/{session_id}/end", response_model=InterviewSession)
+async def interview_end(session_id: int) -> InterviewSession:
+    """End the interview, run the assessment, and update the application."""
+    session = get_interview_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    application_id = session["application_id"]
+    app_data = get_application(application_id) or {}
+    job = get_job(app_data.get("company_slug", ""), app_data.get("job_slug", "")) or {}
+    job_title = app_data.get("job_title", "")
+    company_name = job.get("company", "")
+
+    # Run the LLM assessment on the transcript
+    transcript = session.get("transcript", [])
+    result = await assess_interview(
+        job_title=job_title,
+        company_name=company_name,
+        transcript=transcript,
+    )
+
+    # Persist the assessment
+    feedback_dict = result.feedback.model_dump()
+    complete_interview_session(
+        session_id=session_id,
+        final_score=result.fit_score,
+        feedback={
+            "fit_score": result.fit_score,
+            "feedback": feedback_dict,
+            "proceed": result.proceed_to_interview,
+            "summary": result.message,
+        },
+    )
+
+    # Record stage_result and advance/reject the application
+    record_stage_result(
+        application_id=application_id,
+        stage="interview",
+        status="passed" if result.proceed_to_interview else "failed",
+        score=result.fit_score,
+        feedback=feedback_dict,
+    )
+
+    # Notify the student via personal inbox
+    student_email = app_data.get("student_email", "")
+    student_name = (
+        get_student_by_email(student_email)["name"]
+        if student_email and get_student_by_email(student_email)
+        else ""
+    )
+    feedback_block = (
+        f"INTERVIEW SUMMARY\n"
+        f"────────────────────────\n"
+        f"Overall score: {result.fit_score}/100\n\n"
+        f"WHAT WORKED WELL\n"
+        f"{_format_bullets(feedback_dict.get('strengths', []))}\n\n"
+        f"AREAS FOR IMPROVEMENT\n"
+        f"{_format_bullets(feedback_dict.get('gaps', []))}\n\n"
+        f"SUGGESTIONS\n"
+        f"{_format_bullets(feedback_dict.get('suggestions', []))}\n\n"
+        f"OVERALL\n"
+        f"  {result.message or feedback_dict.get('tailoring', '')}"
+    )
+
+    if result.proceed_to_interview:
+        # Passed — advance to work_task stage. Stage 4 isn't built yet,
+        # but the state will sit there until it is.
+        advance_stage(application_id, "work_task")
+        notify(
+            student_email=student_email,
+            event="interview_invitation",  # reusing the event type for now
+            content=NotifyContent(
+                sender_name=f"{company_name} HR",
+                sender_role="Recruitment Team",
+                subject=f"Great news — you're moving forward at {company_name}",
+                body=(
+                    f"Dear {student_name or 'Candidate'},\n\n"
+                    f"Thank you for taking the time to interview for the "
+                    f"{job_title} role at {company_name}. We were impressed "
+                    f"by what you brought to the conversation and would like "
+                    f"to invite you to the next stage.\n\n"
+                    f"You'll find the next steps in your WorkReady portal.\n\n"
+                    f"Below is a summary of how the interview went so you can "
+                    f"reflect on your performance.\n\n"
+                    f"{feedback_block}\n\n"
+                    f"Best regards,\n"
+                    f"{company_name} Recruitment"
+                ),
+                application_id=application_id,
+                related_stage="work_task",
+            ),
+        )
+    else:
+        # Failed interview — reject the application (company goes off-board)
+        set_application_status(application_id, "rejected")
+        notify(
+            student_email=student_email,
+            event="application_rejected",
+            content=NotifyContent(
+                sender_name=f"{company_name} HR",
+                sender_role="Recruitment Team",
+                subject=f"Update on your interview — {job_title}",
+                body=(
+                    f"Dear {student_name or 'Candidate'},\n\n"
+                    f"Thank you for taking the time to interview for the "
+                    f"{job_title} role at {company_name}. After careful "
+                    f"consideration, we have decided not to progress your "
+                    f"application at this time.\n\n"
+                    f"We've included detailed feedback below — review it "
+                    f"carefully and apply for another role that might be a "
+                    f"stronger fit.\n\n"
+                    f"{feedback_block}\n\n"
+                    f"We wish you the best in your career.\n\n"
+                    f"Best regards,\n"
+                    f"{company_name} Recruitment"
+                ),
+                application_id=application_id,
+                related_stage="interview",
+            ),
+        )
+
+    final = get_interview_session(session_id)
+    return _session_to_model(final)
+
+
+@app.get("/api/v1/interview/{session_id}", response_model=InterviewSession)
+def get_interview(session_id: int) -> InterviewSession:
+    """Get an interview session (active or completed) including the transcript."""
+    session = get_interview_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _session_to_model(session)
