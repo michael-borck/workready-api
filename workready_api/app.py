@@ -17,9 +17,12 @@ from workready_api.db import (
     append_interview_message,
     complete_interview_session,
     create_application,
+    create_booking,
     create_interview_session,
+    get_active_booking,
     get_all_postings,
     get_application,
+    get_bookings_for_application,
     get_db,
     get_inbox,
     get_interview_session,
@@ -28,10 +31,12 @@ from workready_api.db import (
     get_stage_results,
     get_student_applications,
     get_student_by_email,
+    increment_missed_interviews,
     init_db,
     mark_message_read,
     record_stage_result,
     set_application_status,
+    update_booking_status,
 )
 from workready_api.interview import (
     TARGET_TURNS,
@@ -40,6 +45,7 @@ from workready_api.interview import (
     build_interview_system_prompt,
     chat_completion,
 )
+from workready_api import scheduling
 from workready_api.jobs import (
     get_job,
     get_job_description,
@@ -52,7 +58,10 @@ from workready_api.models import (
     ApplicationSummary,
     AssessmentResult,
     BlockedJob,
+    BookingRequest,
+    BookingState,
     Inbox,
+    InterviewBooking,
     InterviewMessage,
     InterviewMessageReply,
     InterviewMessageRequest,
@@ -61,6 +70,8 @@ from workready_api.models import (
     Message,
     PostingList,
     PublicPosting,
+    SlotOption,
+    SlotOptions,
     StageResult,
     StudentProgress,
     StudentState,
@@ -391,6 +402,14 @@ async def submit_resume(
     feedback_dict = result.feedback.model_dump()
     feedback_block = _format_resume_feedback(feedback_dict, result.fit_score)
 
+    # Compute delivery time for the outcome message — by default this is
+    # immediate, but if RESUME_FEEDBACK_DELAY_MINUTES is set the message
+    # is hidden in the inbox until enough time passes (lazy evaluation).
+    outcome_deliver_at = scheduling.feedback_delivery_time(
+        scheduling.RESUME_FEEDBACK_DELAY_MINUTES,
+        scheduling.RESUME_FEEDBACK_DELAY_JITTER_MINUTES,
+    )
+
     if result.proceed_to_interview:
         advance_stage(application_id, "interview")
         # Interview invitation always reveals the actual company —
@@ -425,6 +444,7 @@ async def submit_resume(
                 ),
                 application_id=application_id,
                 related_stage="interview",
+                deliver_at=outcome_deliver_at,
             ),
         )
     else:
@@ -468,6 +488,7 @@ async def submit_resume(
                 ),
                 application_id=application_id,
                 related_stage="resume",
+                deliver_at=outcome_deliver_at,
             ),
         )
 
@@ -803,6 +824,330 @@ def get_practice_script(company_slug: str, job_slug: str) -> Response:
     )
 
 
+# --- Interview booking ---
+
+
+def _format_business_hours_human() -> str:
+    """Human-readable business hours summary for the UI."""
+    days_short = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun"}
+    day_names = [days_short.get(d, "") for d in scheduling.BUSINESS_DAYS]
+    days = "-".join([day_names[0], day_names[-1]]) if len(day_names) >= 2 else day_names[0]
+    start_h = scheduling.BUSINESS_HOURS_START
+    end_h = scheduling.BUSINESS_HOURS_END
+
+    def fmt(h: int) -> str:
+        if h == 0:
+            return "12am"
+        if h == 12:
+            return "12pm"
+        if h < 12:
+            return f"{h}am"
+        return f"{h - 12}pm"
+    return f"{fmt(start_h)}–{fmt(end_h)} {days}"
+
+
+def _build_booking_state(application_id: int, app_data: dict) -> BookingState:
+    """Compute the current booking state for an application."""
+    booking_row = get_active_booking(application_id)
+    booking = None
+    if booking_row:
+        booking = InterviewBooking(
+            id=booking_row["id"],
+            application_id=booking_row["application_id"],
+            scheduled_at=booking_row["scheduled_at"],
+            status=booking_row["status"],
+            created_at=booking_row["created_at"],
+            completed_at=booking_row.get("completed_at"),
+        )
+
+    missed = app_data.get("missed_interviews", 0) or 0
+    max_missed = scheduling.MAX_MISSED_INTERVIEWS
+    can_book = missed < max_missed and app_data.get("status") == "active"
+    rejection_imminent = missed == max_missed - 1
+
+    return BookingState(
+        booking_enabled=scheduling.BOOKING_ENABLED,
+        application_id=application_id,
+        booking=booking,
+        missed_count=missed,
+        max_missed=max_missed,
+        can_book=can_book,
+        rejection_imminent=rejection_imminent,
+    )
+
+
+def _check_for_missed_booking(application_id: int) -> bool:
+    """Check if there's a pending booking past the late grace and mark it missed.
+
+    Returns True if a booking was just marked missed (caller may want to
+    increment counters and notify the student). Idempotent — safe to call
+    on every interview-related request.
+    """
+    booking_row = get_active_booking(application_id)
+    if not booking_row:
+        return False
+
+    scheduled = scheduling.from_iso(booking_row["scheduled_at"])
+    allowed, reason = scheduling.can_start_now(scheduled)
+    if reason == "late":
+        update_booking_status(booking_row["id"], "missed")
+        new_count = increment_missed_interviews(application_id)
+
+        # If we hit max missed, auto-reject the application
+        if new_count >= scheduling.MAX_MISSED_INTERVIEWS:
+            set_application_status(application_id, "rejected")
+            app_data = get_application(application_id) or {}
+            student_email = app_data.get("student_email", "")
+            company_slug = app_data.get("company_slug", "")
+            job_title = app_data.get("job_title", "")
+            job = get_job(company_slug, app_data.get("job_slug", "")) or {}
+            company_name = job.get("company", company_slug)
+            student_name = (
+                get_student_by_email(student_email)["name"]
+                if student_email and get_student_by_email(student_email)
+                else ""
+            )
+            notify(
+                student_email=student_email,
+                event="application_rejected",
+                content=NotifyContent(
+                    sender_name=f"{company_name} HR",
+                    sender_role="Recruitment Team",
+                    subject=f"Update on your application — {job_title}",
+                    body=(
+                        f"Dear {student_name or 'Candidate'},\n\n"
+                        f"We were sorry to see that you missed your "
+                        f"scheduled interview for the {job_title} role at "
+                        f"{company_name}. After several missed appointments "
+                        f"we are no longer able to progress your application.\n\n"
+                        f"We wish you the best in your career and encourage "
+                        f"you to apply for other roles where you can commit "
+                        f"to the scheduled times.\n\n"
+                        f"Best regards,\n"
+                        f"{company_name} Recruitment\n\n"
+                        f"\n{SIMULATION_NOTE_HEADER}\n\n"
+                        f"You missed {new_count} scheduled interview(s) for "
+                        f"this role and the application was automatically "
+                        f"closed. In real recruitment, missing even one "
+                        f"interview without notice usually ends the process. "
+                        f"Treat your scheduled interview times as immovable "
+                        f"commitments and arrive 5 minutes early."
+                    ),
+                    application_id=application_id,
+                    related_stage="interview",
+                ),
+            )
+        else:
+            # Just notify they missed it and need to rebook
+            app_data = get_application(application_id) or {}
+            student_email = app_data.get("student_email", "")
+            company_slug = app_data.get("company_slug", "")
+            job_title = app_data.get("job_title", "")
+            job = get_job(company_slug, app_data.get("job_slug", "")) or {}
+            company_name = job.get("company", company_slug)
+            student_name = (
+                get_student_by_email(student_email)["name"]
+                if student_email and get_student_by_email(student_email)
+                else ""
+            )
+            remaining = scheduling.MAX_MISSED_INTERVIEWS - new_count
+            notify(
+                student_email=student_email,
+                event="application_rejected",  # reuse — it's an inbox notification
+                content=NotifyContent(
+                    sender_name=f"{company_name} HR",
+                    sender_role="Recruitment Team",
+                    subject=f"Missed appointment — {job_title}",
+                    body=(
+                        f"Dear {student_name or 'Candidate'},\n\n"
+                        f"We were expecting you for your interview for the "
+                        f"{job_title} role at {company_name}, but you didn't "
+                        f"join at the scheduled time. We understand things "
+                        f"come up — please log into your WorkReady portal to "
+                        f"reschedule.\n\n"
+                        f"Please note that we can only offer a limited number "
+                        f"of reschedules. After {scheduling.MAX_MISSED_INTERVIEWS} "
+                        f"missed appointments your application will be closed.\n\n"
+                        f"You currently have {remaining} reschedule(s) remaining.\n\n"
+                        f"Best regards,\n"
+                        f"{company_name} Recruitment"
+                    ),
+                    application_id=application_id,
+                    related_stage="interview",
+                ),
+            )
+
+        return True
+    return False
+
+
+@app.get("/api/v1/interview/{application_id}/booking", response_model=BookingState)
+def get_booking(application_id: int) -> BookingState:
+    """Get the current booking state for an application."""
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    # Check if there's a stale booking that needs to be marked missed
+    _check_for_missed_booking(application_id)
+
+    # Re-fetch in case the missed check changed status
+    app_data = get_application(application_id) or app_data
+    return _build_booking_state(application_id, app_data)
+
+
+@app.get("/api/v1/interview/{application_id}/slots", response_model=SlotOptions)
+def get_booking_slots(
+    application_id: int,
+    days: str | None = None,
+    time_of_day: str | None = None,
+) -> SlotOptions:
+    """Generate offered interview slots based on student preferences.
+
+    Query params:
+    - days: comma-separated ISO weekdays (1-7) the student is available
+    - time_of_day: morning | afternoon | any
+    """
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    if not scheduling.BOOKING_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="Interview booking is disabled in this environment",
+        )
+
+    prefs = scheduling.SlotPreferences.from_query(days, time_of_day)
+    raw_slots = scheduling.generate_slots(prefs)
+
+    slots = [
+        SlotOption(
+            scheduled_at=scheduling.to_iso(s),
+            local_display=scheduling.to_local(s).strftime("%A %d %B, %I:%M %p"),
+        )
+        for s in raw_slots
+    ]
+
+    return SlotOptions(
+        application_id=application_id,
+        slots=slots,
+        timezone=scheduling.TIMEZONE_NAME,
+        business_hours=_format_business_hours_human(),
+    )
+
+
+@app.post("/api/v1/interview/{application_id}/book", response_model=BookingState)
+def book_interview(application_id: int, req: BookingRequest) -> BookingState:
+    """Book a specific interview slot."""
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    if not scheduling.BOOKING_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="Interview booking is disabled in this environment",
+        )
+    if app_data["current_stage"] != "interview":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Application is at stage '{app_data['current_stage']}', not 'interview'",
+        )
+    if app_data["status"] != "active":
+        raise HTTPException(status_code=400, detail="Application is not active")
+
+    missed = app_data.get("missed_interviews", 0) or 0
+    if missed >= scheduling.MAX_MISSED_INTERVIEWS:
+        raise HTTPException(
+            status_code=400,
+            detail="Too many missed interviews — this application is closed",
+        )
+
+    # Validate the requested time
+    try:
+        scheduled = scheduling.from_iso(req.scheduled_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid time: {exc}") from exc
+
+    if not scheduling.is_business_time(scheduled):
+        raise HTTPException(
+            status_code=400,
+            detail="Selected time is outside business hours",
+        )
+    if scheduled < scheduling.now_utc():
+        raise HTTPException(status_code=400, detail="Selected time is in the past")
+
+    # Cancel any existing pending booking for this application
+    existing = get_active_booking(application_id)
+    if existing:
+        update_booking_status(existing["id"], "cancelled")
+
+    # Create the new booking
+    booking_id = create_booking(application_id, req.scheduled_at)
+
+    # Send a confirmation message (immediate, never delayed)
+    student_email = app_data.get("student_email", "")
+    job_title = app_data.get("job_title", "")
+    company_slug = app_data.get("company_slug", "")
+    job = get_job(company_slug, app_data.get("job_slug", "")) or {}
+    company_name = job.get("company", company_slug)
+    manager_name = job.get("reports_to", "the hiring manager")
+    student_name = (
+        get_student_by_email(student_email)["name"]
+        if student_email and get_student_by_email(student_email)
+        else ""
+    )
+    local_time = scheduling.to_local(scheduled)
+    nice_time = local_time.strftime("%A %d %B %Y at %I:%M %p %Z")
+
+    notify(
+        student_email=student_email,
+        event="interview_invitation",  # closest event for now
+        content=NotifyContent(
+            sender_name=f"{company_name} HR",
+            sender_role="Recruitment Team",
+            subject=f"Interview confirmed — {job_title} on {local_time.strftime('%a %d %b')}",
+            body=(
+                f"Dear {student_name or 'Candidate'},\n\n"
+                f"Your interview for the {job_title} role at {company_name} "
+                f"is confirmed for:\n\n"
+                f"  {nice_time}\n\n"
+                f"You'll be meeting with {manager_name}. The interview will "
+                f"take place in your WorkReady portal — please log in a few "
+                f"minutes before your scheduled time and click 'Begin "
+                f"Interview' from the Interview view.\n\n"
+                f"Important: please arrive on time. We can only hold the "
+                f"slot for {scheduling.LATE_GRACE_MINUTES} minutes after the "
+                f"scheduled start. After that you will need to reschedule.\n\n"
+                f"If you can't make this time, please reschedule from your "
+                f"WorkReady portal as soon as possible.\n\n"
+                f"We look forward to meeting you.\n\n"
+                f"Best regards,\n"
+                f"{company_name} Recruitment"
+            ),
+            application_id=application_id,
+            related_stage="interview",
+        ),
+    )
+
+    return _build_booking_state(application_id, app_data)
+
+
+@app.post("/api/v1/interview/{application_id}/cancel-booking", response_model=BookingState)
+def cancel_booking(application_id: int) -> BookingState:
+    """Cancel the current pending booking (so the student can rebook)."""
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    booking = get_active_booking(application_id)
+    if booking:
+        update_booking_status(booking["id"], "cancelled")
+
+    return _build_booking_state(application_id, app_data)
+
+
 # --- Stage 3: Interview ---
 
 
@@ -855,6 +1200,47 @@ async def interview_start(req: InterviewStartRequest) -> InterviewSession:
         )
     if app_data["status"] != "active":
         raise HTTPException(status_code=400, detail="Application is not active")
+
+    # Booking enforcement: when enabled, the student must have a confirmed
+    # booking and we must be within the grace window of the scheduled time.
+    if scheduling.BOOKING_ENABLED:
+        # First check if there's a stale booking that should be marked missed
+        _check_for_missed_booking(req.application_id)
+        # Re-fetch in case the missed check rejected the application
+        app_data = get_application(req.application_id) or app_data
+        if app_data["status"] != "active":
+            raise HTTPException(
+                status_code=400,
+                detail="Application has been closed (too many missed appointments)",
+            )
+
+        booking = get_active_booking(req.application_id)
+        if not booking:
+            raise HTTPException(
+                status_code=400,
+                detail="No interview booked. Please schedule an appointment first.",
+            )
+
+        scheduled = scheduling.from_iso(booking["scheduled_at"])
+        allowed, reason = scheduling.can_start_now(scheduled)
+        if reason == "early":
+            local_time = scheduling.to_local(scheduled).strftime(
+                "%A %d %B at %I:%M %p"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Your interview is scheduled for {local_time}. "
+                f"Please come back then.",
+            )
+        if reason == "late":
+            # _check_for_missed_booking already handled this, but defensive
+            raise HTTPException(
+                status_code=400,
+                detail="You arrived too late. Please reschedule your interview.",
+            )
+
+        # Mark the booking as completed (we're starting the interview)
+        update_booking_status(booking["id"], "completed")
 
     # Look up the job and resolve the manager (from interview pipeline)
     company_slug = app_data["company_slug"]

@@ -51,6 +51,12 @@ class NotifyContent:
     The notify() function formats this for each channel — in-app inbox
     stores subject + body, email might use HTML, Telegram uses markdown,
     SMS truncates to 160 chars, etc.
+
+    deliver_at: optional UTC ISO string. If set, the notification is
+    scheduled rather than delivered immediately. The in-app channel
+    stores it on the message and the inbox endpoint hides it until
+    the time arrives. Other channels may schedule via their own queue
+    or fall back to immediate delivery.
     """
 
     sender_name: str
@@ -59,6 +65,7 @@ class NotifyContent:
     body: str = ""
     application_id: int | None = None
     related_stage: str | None = None
+    deliver_at: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -184,6 +191,7 @@ def _inapp_handler(student_email: str, content: NotifyContent) -> None:
         inbox="personal",
         application_id=content.application_id,
         related_stage=content.related_stage,
+        deliver_at=content.deliver_at,
     )
 
 

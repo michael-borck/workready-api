@@ -156,6 +156,52 @@ class InterviewMessageReply(BaseModel):
     suggested_wrap_up: bool
 
 
+# --- Interview booking ---
+
+
+class InterviewBooking(BaseModel):
+    """An interview appointment booking."""
+
+    id: int
+    application_id: int
+    scheduled_at: str  # UTC ISO
+    status: str  # pending | completed | missed | cancelled
+    created_at: str
+    completed_at: str | None = None
+
+
+class BookingState(BaseModel):
+    """Current booking state for an application."""
+
+    booking_enabled: bool
+    application_id: int
+    booking: InterviewBooking | None = None
+    missed_count: int
+    max_missed: int
+    can_book: bool
+    rejection_imminent: bool = False  # one more miss = auto-reject
+
+
+class SlotOption(BaseModel):
+    """A single offered interview slot."""
+
+    scheduled_at: str  # UTC ISO
+    local_display: str  # human-readable in local timezone
+
+
+class SlotOptions(BaseModel):
+    """Slots offered for booking based on student preferences."""
+
+    application_id: int
+    slots: list[SlotOption]
+    timezone: str
+    business_hours: str  # e.g. "9am-5pm Mon-Fri"
+
+
+class BookingRequest(BaseModel):
+    scheduled_at: str  # UTC ISO
+
+
 class StudentState(BaseModel):
     """High-level state for the portal — what the student should see."""
 

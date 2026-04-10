@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS applications (
     current_stage TEXT DEFAULT 'resume',
     current_interview_step INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
+    missed_interviews INTEGER NOT NULL DEFAULT 0,
     cycle INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -101,6 +102,15 @@ CREATE TABLE IF NOT EXISTS messages (
     deliver_at TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS interview_bookings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id INTEGER NOT NULL REFERENCES applications(id),
+    scheduled_at TEXT NOT NULL,                        -- UTC ISO 8601
+    status TEXT NOT NULL DEFAULT 'pending',            -- pending|completed|missed|cancelled
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
 """
 
 # Indexes — run AFTER migrations so any newly added columns exist
@@ -121,6 +131,8 @@ CREATE INDEX IF NOT EXISTS idx_postings_company_job
     ON postings(company_slug, job_slug);
 CREATE INDEX IF NOT EXISTS idx_applications_posting
     ON applications(posting_id);
+CREATE INDEX IF NOT EXISTS idx_interview_bookings_application
+    ON interview_bookings(application_id);
 """
 
 
@@ -207,6 +219,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "cycle" not in app_cols:
         conn.execute(
             "ALTER TABLE applications ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1"
+        )
+        app_cols = _table_columns(conn, "applications")
+
+    # --- Migration 4d: applications.missed_interviews ---
+    if "missed_interviews" not in app_cols:
+        conn.execute(
+            "ALTER TABLE applications ADD COLUMN missed_interviews "
+            "INTEGER NOT NULL DEFAULT 0"
         )
 
     # --- Migration 4: messages.student_id (replacing student_email FK) ---
@@ -544,6 +564,67 @@ def get_student_applications(student_id: int) -> list[dict[str, Any]]:
             (student_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def create_booking(application_id: int, scheduled_at: str) -> int:
+    """Create a new interview booking. Returns booking ID."""
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO interview_bookings
+               (application_id, scheduled_at, status, created_at)
+               VALUES (?, ?, 'pending', ?)""",
+            (application_id, scheduled_at, now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_active_booking(application_id: int) -> dict[str, Any] | None:
+    """Get the current pending booking for an application, if any."""
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT * FROM interview_bookings
+               WHERE application_id = ? AND status = 'pending'
+               ORDER BY scheduled_at DESC LIMIT 1""",
+            (application_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_bookings_for_application(application_id: int) -> list[dict[str, Any]]:
+    """Get all bookings for an application (any status)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM interview_bookings WHERE application_id = ? "
+            "ORDER BY created_at",
+            (application_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_booking_status(booking_id: int, status: str) -> None:
+    """Update a booking status (pending|completed|missed|cancelled)."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE interview_bookings SET status = ?, completed_at = ? "
+            "WHERE id = ?",
+            (status, _now(), booking_id),
+        )
+
+
+def increment_missed_interviews(application_id: int) -> int:
+    """Increment the missed_interviews counter and return the new value."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE applications SET missed_interviews = missed_interviews + 1, "
+            "updated_at = ? WHERE id = ?",
+            (_now(), application_id),
+        )
+        row = conn.execute(
+            "SELECT missed_interviews FROM applications WHERE id = ?",
+            (application_id,),
+        ).fetchone()
+    return row["missed_interviews"] if row else 0
 
 
 def create_interview_session(
