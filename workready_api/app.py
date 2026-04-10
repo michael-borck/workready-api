@@ -34,6 +34,7 @@ from workready_api.db import (
     get_student_applications,
     get_student_by_email,
     increment_missed_interviews,
+    increment_reschedule_count,
     init_db,
     mark_message_read,
     record_stage_result,
@@ -848,6 +849,30 @@ def _format_business_hours_human() -> str:
     return f"{fmt(start_h)}–{fmt(end_h)} {days}"
 
 
+def _try_use_reschedule(application_id: int, app_data: dict) -> int:
+    """Check the reschedule limit, increment if allowed, return new count.
+
+    Raises HTTPException(400) if the application is at the hard limit.
+    Returns the new reschedule count after incrementing.
+
+    In soft mode, always increments and never raises.
+    """
+    current = app_data.get("reschedule_count", 0) or 0
+    if (
+        scheduling.RESCHEDULE_LIMIT_MODE == "hard"
+        and current >= scheduling.MAX_RESCHEDULES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"You have used your {scheduling.MAX_RESCHEDULES} allowed "
+                f"reschedule(s) for this interview. The current booking is "
+                f"final — please attend at the scheduled time."
+            ),
+        )
+    return increment_reschedule_count(application_id)
+
+
 def _create_reminders(
     booking_id: int,
     application_id: int,
@@ -949,12 +974,24 @@ def _build_booking_state(application_id: int, app_data: dict) -> BookingState:
     can_book = missed < max_missed and app_data.get("status") == "active"
     rejection_imminent = missed == max_missed - 1
 
+    rescheduled = app_data.get("reschedule_count", 0) or 0
+    max_reschedules = scheduling.MAX_RESCHEDULES
+    # In hard mode, exceeding the limit is blocked. In soft mode, the counter
+    # is tracked but not enforced.
+    if scheduling.RESCHEDULE_LIMIT_MODE == "hard":
+        can_reschedule = rescheduled < max_reschedules
+    else:
+        can_reschedule = True
+
     return BookingState(
         booking_enabled=scheduling.BOOKING_ENABLED,
         application_id=application_id,
         booking=booking,
         missed_count=missed,
         max_missed=max_missed,
+        reschedule_count=rescheduled,
+        max_reschedules=max_reschedules,
+        can_reschedule=can_reschedule,
         can_book=can_book,
         rejection_imminent=rejection_imminent,
     )
@@ -1162,12 +1199,24 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
     if scheduled < scheduling.now_utc():
         raise HTTPException(status_code=400, detail="Selected time is in the past")
 
-    # Cancel any existing pending booking for this application and clean
-    # up its pending reminder messages so they don't fire on the wrong day
+    # If there's an existing active booking, replacing it counts as a
+    # reschedule (same as calling /cancel-booking first then /book).
+    # This branch fires when the API is hit directly without going via
+    # the portal's cancel-then-book flow.
+    is_reschedule = False
     existing = get_active_booking(application_id)
     if existing:
+        _try_use_reschedule(application_id, app_data)
         update_booking_status(existing["id"], "cancelled")
         delete_pending_messages_for_booking(existing["id"])
+        is_reschedule = True
+        # Re-fetch app_data after the counter changed
+        app_data = get_application(application_id) or app_data
+    elif (app_data.get("reschedule_count", 0) or 0) > 0:
+        # No active booking right now, but the counter > 0 means a previous
+        # cancel-booking call already counted this as a reschedule. We're
+        # the new booking arriving after that cancel. Don't double count.
+        is_reschedule = True
 
     # Create the new booking
     booking_id = create_booking(application_id, req.scheduled_at)
@@ -1233,16 +1282,45 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
     )
     ics_url = f"{api_base}/api/v1/interview/{application_id}/booking.ics"
 
+    # Differentiate first booking from reschedule in the message subject/intro
+    if is_reschedule:
+        subject_prefix = "Updated confirmation"
+        opening_line = (
+            f"This is a confirmation of your **rescheduled** interview for "
+            f"{role_at_company}. Your new interview time is:"
+        )
+        rescheduled_count = app_data.get("reschedule_count", 0) or 0
+        max_r = scheduling.MAX_RESCHEDULES
+        if (
+            scheduling.RESCHEDULE_LIMIT_MODE == "hard"
+            and rescheduled_count >= max_r
+        ):
+            reschedule_warning = (
+                f"\n\nPlease note: this is your final reschedule. The booking "
+                f"is now fixed and cannot be moved again. If you can't attend, "
+                f"the application will be closed.\n"
+            )
+        else:
+            remaining = max(max_r - rescheduled_count, 0)
+            reschedule_warning = (
+                f"\n\nPlease note: you have {remaining} reschedule(s) remaining "
+                f"for this interview.\n"
+            ) if scheduling.RESCHEDULE_LIMIT_MODE == "hard" else ""
+    else:
+        subject_prefix = "Interview confirmed"
+        opening_line = f"Your interview for {role_at_company} is confirmed for:"
+        reschedule_warning = ""
+
     notify(
         student_email=student_email,
         event="interview_invitation",  # closest event for now
         content=NotifyContent(
             sender_name=sender_name,
             sender_role=sender_role,
-            subject=f"Interview confirmed — {display_role} on {local_time.strftime('%a %d %b')}",
+            subject=f"{subject_prefix} — {display_role} on {local_time.strftime('%a %d %b')}",
             body=(
                 f"Dear {student_name or 'Candidate'},\n\n"
-                f"Your interview for {role_at_company} is confirmed for:\n\n"
+                f"{opening_line}\n\n"
                 f"  {nice_time}\n\n"
                 f"{meeting_with_line} Please log in a few minutes before "
                 f"your scheduled time and click 'Begin Interview' from the "
@@ -1251,9 +1329,8 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
                 f"  {ics_url}\n\n"
                 f"Important: please arrive on time. We can only hold the "
                 f"slot for {scheduling.LATE_GRACE_MINUTES} minutes after the "
-                f"scheduled start. After that you will need to reschedule.\n\n"
-                f"If you can't make this time, please reschedule from your "
-                f"WorkReady portal as soon as possible.\n\n"
+                f"scheduled start."
+                f"{reschedule_warning}\n\n"
                 f"We look forward to meeting you.\n\n"
                 f"Best regards,\n"
                 f"{signoff}"
@@ -1416,6 +1493,9 @@ def get_booking_ics(application_id: int) -> Response:
 def cancel_booking(application_id: int) -> BookingState:
     """Cancel the current pending booking (so the student can rebook).
 
+    Counts as a reschedule. If the student is at the hard reschedule
+    limit, this is rejected — they must attend the existing booking.
+
     Also deletes any pending reminder messages tied to this booking so
     they don't fire on the now-cancelled appointment.
     """
@@ -1425,8 +1505,13 @@ def cancel_booking(application_id: int) -> BookingState:
 
     booking = get_active_booking(application_id)
     if booking:
+        # Cancelling counts as a reschedule. Check the limit before doing
+        # anything destructive.
+        _try_use_reschedule(application_id, app_data)
         update_booking_status(booking["id"], "cancelled")
         delete_pending_messages_for_booking(booking["id"])
+        # Re-fetch app_data so the response shows the new counter
+        app_data = get_application(application_id) or app_data
 
     return _build_booking_state(application_id, app_data)
 

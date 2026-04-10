@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS applications (
     current_interview_step INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     missed_interviews INTEGER NOT NULL DEFAULT 0,
+    reschedule_count INTEGER NOT NULL DEFAULT 0,
     cycle INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -227,6 +228,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "missed_interviews" not in app_cols:
         conn.execute(
             "ALTER TABLE applications ADD COLUMN missed_interviews "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+        app_cols = _table_columns(conn, "applications")
+
+    # --- Migration 4e: applications.reschedule_count ---
+    if "reschedule_count" not in app_cols:
+        conn.execute(
+            "ALTER TABLE applications ADD COLUMN reschedule_count "
             "INTEGER NOT NULL DEFAULT 0"
         )
 
@@ -634,6 +643,21 @@ def increment_missed_interviews(application_id: int) -> int:
             (application_id,),
         ).fetchone()
     return row["missed_interviews"] if row else 0
+
+
+def increment_reschedule_count(application_id: int) -> int:
+    """Increment the reschedule_count counter and return the new value."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE applications SET reschedule_count = reschedule_count + 1, "
+            "updated_at = ? WHERE id = ?",
+            (_now(), application_id),
+        )
+        row = conn.execute(
+            "SELECT reschedule_count FROM applications WHERE id = ?",
+            (application_id,),
+        ).fetchone()
+    return row["reschedule_count"] if row else 0
 
 
 def create_interview_session(

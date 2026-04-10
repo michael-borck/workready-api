@@ -178,6 +178,9 @@ class BookingState(BaseModel):
     booking: InterviewBooking | None = None
     missed_count: int
     max_missed: int
+    reschedule_count: int = 0
+    max_reschedules: int = 0
+    can_reschedule: bool = True
     can_book: bool
     rejection_imminent: bool = False  # one more miss = auto-reject
 
