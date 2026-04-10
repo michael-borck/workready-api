@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from workready_api.assessor import assess
@@ -123,11 +123,22 @@ def _format_bullets(items: list[str], indent: str = "  • ") -> str:
     return "\n".join(f"{indent}{item}" for item in items)
 
 
+SIMULATION_NOTE_HEADER = (
+    "════════════════════════════════════════════════════════════\n"
+    "  WORKREADY SIMULATION NOTE — FOR YOUR LEARNING\n"
+    "════════════════════════════════════════════════════════════\n"
+    "This level of feedback isn't typically shared by real employers.\n"
+    "We've included it here so you can learn from this experience and\n"
+    "use the insights when applying for real roles.\n"
+    "────────────────────────────────────────────────────────────"
+)
+
+
 def _format_resume_feedback(feedback: dict, fit_score: int) -> str:
     """Format the resume assessment feedback as a plain-text block."""
     return (
+        f"{SIMULATION_NOTE_HEADER}\n\n"
         f"YOUR APPLICATION SUMMARY\n"
-        f"────────────────────────\n"
         f"Overall fit score: {fit_score}/100\n\n"
         f"WHAT WORKED WELL\n"
         f"{_format_bullets(feedback.get('strengths', []))}\n\n"
@@ -136,36 +147,31 @@ def _format_resume_feedback(feedback: dict, fit_score: int) -> str:
         f"SUGGESTIONS\n"
         f"{_format_bullets(feedback.get('suggestions', []))}\n\n"
         f"TAILORING ASSESSMENT\n"
-        f"  {feedback.get('tailoring', '(none)')}"
+        f"  {feedback.get('tailoring', '(none)')}\n\n"
+        f"────────────────────────────────────────────────────────────\n"
+        f"Want to practise for similar roles? Download a practice script\n"
+        f"from the WorkReady portal and use it with Talk Buddy or any AI\n"
+        f"chat tool to rehearse before your next attempt."
     )
 
 
-def _format_interview_transcript(
-    transcript: list[dict],
-    manager_name: str,
-    student_name: str,
-) -> str:
-    """Format an interview transcript as a readable plain-text block.
-
-    Each turn is labelled with the speaker and separated by a blank line
-    so the student can re-read the conversation in their inbox like a
-    transcript of a real interview.
-    """
-    if not transcript:
-        return "(transcript unavailable)"
-
-    lines: list[str] = []
-    for msg in transcript:
-        role = msg.get("role", "")
-        content = (msg.get("content", "") or "").strip()
-        if not content:
-            continue
-        speaker = manager_name if role == "assistant" else (student_name or "You")
-        lines.append(f"{speaker.upper()}:")
-        lines.append(content)
-        lines.append("")  # blank line between turns
-
-    return "\n".join(lines).rstrip()
+def _format_interview_feedback(feedback: dict, fit_score: int) -> str:
+    """Format the interview assessment feedback as a plain-text block."""
+    return (
+        f"{SIMULATION_NOTE_HEADER}\n\n"
+        f"INTERVIEW SUMMARY\n"
+        f"Overall score: {fit_score}/100\n\n"
+        f"WHAT WORKED WELL\n"
+        f"{_format_bullets(feedback.get('strengths', []))}\n\n"
+        f"AREAS FOR IMPROVEMENT\n"
+        f"{_format_bullets(feedback.get('gaps', []))}\n\n"
+        f"SUGGESTIONS\n"
+        f"{_format_bullets(feedback.get('suggestions', []))}\n\n"
+        f"────────────────────────────────────────────────────────────\n"
+        f"Want to practise interviews? Download a practice script for\n"
+        f"this role from your WorkReady portal and use it with Talk Buddy\n"
+        f"or any AI chat tool to rehearse before your next attempt."
+    )
 
 
 def _revealed_postings_for_student(student_id: int) -> set[int]:
@@ -412,12 +418,10 @@ async def submit_resume(
                     f"You'll find the interview ready in your WorkReady portal "
                     f"under your dashboard. The interview will be a conversation "
                     f"with the hiring manager and should take around 15 minutes.\n\n"
-                    f"Below is a summary of how your application was assessed, "
-                    f"so you can prepare with confidence.\n\n"
-                    f"{feedback_block}\n\n"
                     f"We look forward to meeting you.\n\n"
                     f"Best regards,\n"
-                    f"{company_name} Recruitment"
+                    f"{company_name} Recruitment\n\n"
+                    f"\n{feedback_block}"
                 ),
                 application_id=application_id,
                 related_stage="interview",
@@ -454,13 +458,13 @@ async def submit_resume(
                     f"Thank you for your interest in {reject_about} "
                     f"and for taking the time to submit your application.\n\n"
                     f"After careful consideration, we have decided not to "
-                    f"progress your application at this time. We've included "
-                    f"detailed feedback below — review it carefully, then apply "
-                    f"for another role that might be a stronger fit.\n\n"
-                    f"{feedback_block}\n\n"
-                    f"We wish you the best in your career.\n\n"
+                    f"progress your application at this time. We had a strong "
+                    f"field of applicants and the decision was a difficult one.\n\n"
+                    f"We wish you the best in your career and encourage you to "
+                    f"apply for other roles that may be a better fit.\n\n"
                     f"Best regards,\n"
-                    f"{reject_signoff}"
+                    f"{reject_signoff}\n\n"
+                    f"\n{feedback_block}"
                 ),
                 application_id=application_id,
                 related_stage="resume",
@@ -654,6 +658,148 @@ def get_application_detail(application_id: int) -> ApplicationDetail:
             StageResult(**s)
             for s in stages
         ],
+    )
+
+
+# --- Practice script (downloadable for Talk Buddy / any LLM tool) ---
+
+
+def _build_practice_script(job: dict, posting: dict | None = None) -> str:
+    """Generate a markdown practice script for an interview.
+
+    Self-contained: contains the manager persona, job description, and
+    instructions for using the script in Talk Buddy or any AI chat tool.
+    Students download this and practise offline as many times as they like.
+    """
+    company_name = job.get("company", "")
+    job_title = job.get("title", "")
+    department = job.get("department", "")
+    location = job.get("location", "Perth, Western Australia")
+    employment_type = job.get("employment_type", "")
+    manager_name = job.get("reports_to", "the hiring manager")
+    manager_persona = job.get("manager_persona", "").strip()
+    description = (job.get("description", "") or "").strip()
+
+    return f"""# Interview Practice: {job_title}
+
+**Company:** {company_name}
+**Department:** {department}
+**Location:** {location}
+**Employment type:** {employment_type}
+**Hiring manager:** {manager_name}
+
+---
+
+## How to use this script
+
+This is a practice exercise — not the real WorkReady interview. Use it as
+many times as you like to rehearse before applying or after a difficult
+attempt. The full system prompt below configures any AI chat tool to
+play the hiring manager.
+
+### Option 1 — Talk Buddy (recommended)
+
+1. Open Talk Buddy
+2. Create a new scenario
+3. Copy the **System Prompt** section below into the scenario configuration
+4. Start the practice — you'll be the candidate, the AI will be {manager_name}
+5. Talk Buddy supports voice, so you can practise speaking under pressure
+
+### Option 2 — Any AI chat tool (ChatGPT, Claude, etc.)
+
+1. Open the chat tool of your choice
+2. Paste the **System Prompt** section below as your first message
+3. Add: "Please stay in this character and conduct the interview"
+4. Have a back-and-forth conversation as the candidate
+5. At the end, ask: "Please give me detailed feedback on how I did"
+
+---
+
+## System Prompt
+
+```
+{manager_persona}
+
+═══════════════════════════════════════════════════════════
+You are conducting a job interview for the role of {job_title} at {company_name}.
+
+This is a practice session. Stay in character throughout. Speak as you
+would to a real candidate — warm but professional, curious, evaluating.
+
+JOB DESCRIPTION:
+{description[:2000]}
+
+GUIDELINES:
+- Speak conversationally, in first person, as the manager character
+- Ask ONE question at a time and wait for the answer
+- Cover these phases naturally over ~10 exchanges:
+  1. Welcome & icebreaker
+  2. Motivation & company research
+  3. Role-specific questions
+  4. Behavioural questions ("Tell me about a time when...")
+  5. Candidate questions
+  6. Close
+- Be warm but don't fawn. Be honest but not harsh.
+- After the interview ends, provide structured feedback covering:
+  - Overall impression
+  - Strengths
+  - Areas for improvement
+  - Specific suggestions to practise next time
+```
+
+---
+
+## What to focus on while practising
+
+- **Tell concrete stories.** Use the STAR method (Situation, Task, Action,
+  Result) for behavioural questions.
+- **Reference {company_name} specifically.** Show you've thought about
+  why this company, not just any company in the sector.
+- **Ask good questions.** Prepare 2–3 thoughtful questions about the role,
+  the team, or the company's direction.
+- **Pace yourself.** It's OK to pause before answering. Better to take a
+  breath than to ramble.
+- **Be authentic.** The manager will see through rehearsed answers.
+
+## Self-evaluation
+
+After each practice session, ask yourself:
+
+- [ ] Did I give specific, concrete examples instead of generalities?
+- [ ] Did I mention {company_name} or its work specifically?
+- [ ] Did I ask thoughtful questions at the end?
+- [ ] Did I handle moments of uncertainty without panicking?
+- [ ] Could I tell a clearer story about why I want this role?
+
+---
+
+*Generated by the WorkReady simulation. This practice script is designed
+to help you prepare for an interview at {company_name} or any similar
+role. Practise as many times as you like — there's no limit and no
+record kept.*
+"""
+
+
+@app.get("/api/v1/jobs/{company_slug}/{job_slug}/practice-script")
+def get_practice_script(company_slug: str, job_slug: str) -> Response:
+    """Return a markdown practice script for a job.
+
+    The student downloads this and uses it in Talk Buddy or any AI chat
+    tool to rehearse for the interview offline. The script contains the
+    manager persona, job description, and practice instructions.
+    """
+    job = get_job(company_slug, job_slug)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    markdown = _build_practice_script(job)
+    filename = f"practice-{company_slug}-{job_slug}.md"
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
     )
 
 
@@ -869,33 +1015,7 @@ async def interview_end(session_id: int) -> InterviewSession:
         if student_email and get_student_by_email(student_email)
         else ""
     )
-    feedback_block = (
-        f"INTERVIEW SUMMARY\n"
-        f"────────────────────────\n"
-        f"Overall score: {result.fit_score}/100\n\n"
-        f"WHAT WORKED WELL\n"
-        f"{_format_bullets(feedback_dict.get('strengths', []))}\n\n"
-        f"AREAS FOR IMPROVEMENT\n"
-        f"{_format_bullets(feedback_dict.get('gaps', []))}\n\n"
-        f"SUGGESTIONS\n"
-        f"{_format_bullets(feedback_dict.get('suggestions', []))}\n\n"
-        f"OVERALL\n"
-        f"  {result.message or feedback_dict.get('tailoring', '')}"
-    )
-
-    # Full transcript for the student's permanent record. Real organisations
-    # don't usually share interview transcripts, but for an educational
-    # simulation it's the most valuable artefact for reflective learning.
-    transcript_text = _format_interview_transcript(
-        transcript=transcript,
-        manager_name=session["manager_name"],
-        student_name=student_name,
-    )
-    transcript_block = (
-        f"FULL INTERVIEW TRANSCRIPT\n"
-        f"────────────────────────\n"
-        f"{transcript_text}"
-    )
+    feedback_block = _format_interview_feedback(feedback_dict, result.fit_score)
 
     if result.proceed_to_interview:
         # Passed — advance to work_task stage. Stage 4 isn't built yet,
@@ -911,17 +1031,14 @@ async def interview_end(session_id: int) -> InterviewSession:
                 body=(
                     f"Dear {student_name or 'Candidate'},\n\n"
                     f"Thank you for taking the time to interview for the "
-                    f"{job_title} role at {company_name}. We were impressed "
-                    f"by what you brought to the conversation and would like "
-                    f"to invite you to the next stage.\n\n"
+                    f"{job_title} role at {company_name}. We enjoyed our "
+                    f"conversation and would like to invite you to the next "
+                    f"stage of our process.\n\n"
                     f"You'll find the next steps in your WorkReady portal.\n\n"
-                    f"Below is a summary of how the interview went so you can "
-                    f"reflect on your performance, followed by the full "
-                    f"transcript of our conversation for your records.\n\n"
-                    f"{feedback_block}\n\n"
-                    f"{transcript_block}\n\n"
+                    f"We look forward to working with you.\n\n"
                     f"Best regards,\n"
-                    f"{company_name} Recruitment"
+                    f"{company_name} Recruitment\n\n"
+                    f"\n{feedback_block}"
                 ),
                 application_id=application_id,
                 related_stage="work_task",
@@ -943,15 +1060,12 @@ async def interview_end(session_id: int) -> InterviewSession:
                     f"{job_title} role at {company_name}. After careful "
                     f"consideration, we have decided not to progress your "
                     f"application at this time.\n\n"
-                    f"We've included detailed feedback below — review it "
-                    f"carefully and apply for another role that might be a "
-                    f"stronger fit. The full transcript of our conversation "
-                    f"is at the bottom for your reference.\n\n"
-                    f"{feedback_block}\n\n"
-                    f"{transcript_block}\n\n"
-                    f"We wish you the best in your career.\n\n"
+                    f"We had a strong field of candidates and the decision "
+                    f"was a difficult one. We wish you the best in your "
+                    f"career and encourage you to apply for other roles.\n\n"
                     f"Best regards,\n"
-                    f"{company_name} Recruitment"
+                    f"{company_name} Recruitment\n\n"
+                    f"\n{feedback_block}"
                 ),
                 application_id=application_id,
                 related_stage="interview",
