@@ -140,6 +140,34 @@ def _format_resume_feedback(feedback: dict, fit_score: int) -> str:
     )
 
 
+def _format_interview_transcript(
+    transcript: list[dict],
+    manager_name: str,
+    student_name: str,
+) -> str:
+    """Format an interview transcript as a readable plain-text block.
+
+    Each turn is labelled with the speaker and separated by a blank line
+    so the student can re-read the conversation in their inbox like a
+    transcript of a real interview.
+    """
+    if not transcript:
+        return "(transcript unavailable)"
+
+    lines: list[str] = []
+    for msg in transcript:
+        role = msg.get("role", "")
+        content = (msg.get("content", "") or "").strip()
+        if not content:
+            continue
+        speaker = manager_name if role == "assistant" else (student_name or "You")
+        lines.append(f"{speaker.upper()}:")
+        lines.append(content)
+        lines.append("")  # blank line between turns
+
+    return "\n".join(lines).rstrip()
+
+
 def _revealed_postings_for_student(student_id: int) -> set[int]:
     """Postings (by id) the student has had a confidential reveal for.
 
@@ -855,6 +883,20 @@ async def interview_end(session_id: int) -> InterviewSession:
         f"  {result.message or feedback_dict.get('tailoring', '')}"
     )
 
+    # Full transcript for the student's permanent record. Real organisations
+    # don't usually share interview transcripts, but for an educational
+    # simulation it's the most valuable artefact for reflective learning.
+    transcript_text = _format_interview_transcript(
+        transcript=transcript,
+        manager_name=session["manager_name"],
+        student_name=student_name,
+    )
+    transcript_block = (
+        f"FULL INTERVIEW TRANSCRIPT\n"
+        f"────────────────────────\n"
+        f"{transcript_text}"
+    )
+
     if result.proceed_to_interview:
         # Passed — advance to work_task stage. Stage 4 isn't built yet,
         # but the state will sit there until it is.
@@ -874,8 +916,10 @@ async def interview_end(session_id: int) -> InterviewSession:
                     f"to invite you to the next stage.\n\n"
                     f"You'll find the next steps in your WorkReady portal.\n\n"
                     f"Below is a summary of how the interview went so you can "
-                    f"reflect on your performance.\n\n"
+                    f"reflect on your performance, followed by the full "
+                    f"transcript of our conversation for your records.\n\n"
                     f"{feedback_block}\n\n"
+                    f"{transcript_block}\n\n"
                     f"Best regards,\n"
                     f"{company_name} Recruitment"
                 ),
@@ -901,8 +945,10 @@ async def interview_end(session_id: int) -> InterviewSession:
                     f"application at this time.\n\n"
                     f"We've included detailed feedback below — review it "
                     f"carefully and apply for another role that might be a "
-                    f"stronger fit.\n\n"
+                    f"stronger fit. The full transcript of our conversation "
+                    f"is at the bottom for your reference.\n\n"
                     f"{feedback_block}\n\n"
+                    f"{transcript_block}\n\n"
                     f"We wish you the best in your career.\n\n"
                     f"Best regards,\n"
                     f"{company_name} Recruitment"
