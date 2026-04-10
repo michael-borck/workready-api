@@ -32,10 +32,24 @@ CREATE TABLE IF NOT EXISTS students (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS postings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_slug TEXT NOT NULL,
+    job_slug TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'direct',  -- direct | agency
+    agency_name TEXT,
+    listing_title TEXT NOT NULL,
+    listing_description TEXT,
+    confidential INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(company_slug, job_slug, source_type, agency_name)
+);
+
 CREATE TABLE IF NOT EXISTS applications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     student_id INTEGER NOT NULL REFERENCES students(id),
     student_email TEXT NOT NULL,
+    posting_id INTEGER REFERENCES postings(id),
     company_slug TEXT NOT NULL,
     job_slug TEXT NOT NULL,
     job_title TEXT NOT NULL,
@@ -43,6 +57,7 @@ CREATE TABLE IF NOT EXISTS applications (
     current_stage TEXT DEFAULT 'resume',
     current_interview_step INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
+    cycle INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -102,6 +117,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_student
     ON messages(student_id, inbox);
 CREATE INDEX IF NOT EXISTS idx_interview_sessions_application
     ON interview_sessions(application_id);
+CREATE INDEX IF NOT EXISTS idx_postings_company_job
+    ON postings(company_slug, job_slug);
+CREATE INDEX IF NOT EXISTS idx_applications_posting
+    ON applications(posting_id);
 """
 
 
@@ -174,6 +193,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE applications ADD COLUMN current_interview_step "
             "INTEGER NOT NULL DEFAULT 0"
+        )
+        app_cols = _table_columns(conn, "applications")
+
+    # --- Migration 4b: applications.posting_id ---
+    if "posting_id" not in app_cols:
+        conn.execute(
+            "ALTER TABLE applications ADD COLUMN posting_id INTEGER REFERENCES postings(id)"
+        )
+        app_cols = _table_columns(conn, "applications")
+
+    # --- Migration 4c: applications.cycle ---
+    if "cycle" not in app_cols:
+        conn.execute(
+            "ALTER TABLE applications ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1"
         )
 
     # --- Migration 4: messages.student_id (replacing student_email FK) ---
@@ -278,26 +311,35 @@ def create_application(
     job_title: str,
     source: str = "direct",
     student_email: str | None = None,
+    posting_id: int | None = None,
+    cycle: int | None = None,
 ) -> int:
     """Create a new application record. Returns the application ID.
 
-    student_email is kept as a denormalised column for backwards compatibility
-    with the legacy schema. New code should treat student_id as authoritative.
+    If posting_id is not provided, looks up the direct posting for this
+    job. If cycle is not provided, uses get_next_cycle(student_id).
     """
     now = _now()
-    # Look up email for the legacy column if not provided
     if student_email is None:
         student = get_student_by_id(student_id)
         student_email = student["email"] if student else ""
 
+    if posting_id is None:
+        direct = get_direct_posting(company_slug, job_slug)
+        if direct:
+            posting_id = direct["id"]
+
+    if cycle is None:
+        cycle = get_next_cycle(student_id)
+
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO applications
-               (student_id, student_email, company_slug, job_slug, job_title,
-                source, current_stage, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'resume', ?, ?)""",
-            (student_id, student_email, company_slug, job_slug, job_title,
-             source, now, now),
+               (student_id, student_email, posting_id, company_slug, job_slug,
+                job_title, source, current_stage, cycle, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'resume', ?, ?, ?)""",
+            (student_id, student_email, posting_id, company_slug, job_slug,
+             job_title, source, cycle, now, now),
         )
         return cursor.lastrowid  # type: ignore[return-value]
 
@@ -354,6 +396,119 @@ def set_application_status(application_id: int, status: str) -> None:
             "UPDATE applications SET status = ?, updated_at = ? WHERE id = ?",
             (status, _now(), application_id),
         )
+
+
+def upsert_posting(
+    company_slug: str,
+    job_slug: str,
+    listing_title: str,
+    source_type: str = "direct",
+    agency_name: str | None = None,
+    listing_description: str | None = None,
+    confidential: bool = False,
+) -> int:
+    """Insert or update a posting. Returns the posting ID.
+
+    Uniqueness is on (company_slug, job_slug, source_type, agency_name)
+    so re-running seed operations is idempotent.
+    """
+    now = _now()
+    with get_db() as conn:
+        # Check for existing
+        row = conn.execute(
+            """SELECT id FROM postings
+               WHERE company_slug = ? AND job_slug = ?
+                 AND source_type = ? AND IFNULL(agency_name, '') = IFNULL(?, '')""",
+            (company_slug, job_slug, source_type, agency_name),
+        ).fetchone()
+        if row:
+            # Update title/description in case it changed
+            conn.execute(
+                """UPDATE postings SET listing_title = ?, listing_description = ?,
+                   confidential = ? WHERE id = ?""",
+                (listing_title, listing_description, int(confidential), row["id"]),
+            )
+            return row["id"]
+
+        cursor = conn.execute(
+            """INSERT INTO postings
+               (company_slug, job_slug, source_type, agency_name,
+                listing_title, listing_description, confidential, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (company_slug, job_slug, source_type, agency_name,
+             listing_title, listing_description, int(confidential), now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_posting(posting_id: int) -> dict[str, Any] | None:
+    """Look up a posting by ID."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM postings WHERE id = ?", (posting_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_direct_posting(company_slug: str, job_slug: str) -> dict[str, Any] | None:
+    """Get the direct (company-owned) posting for a job."""
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT * FROM postings
+               WHERE company_slug = ? AND job_slug = ? AND source_type = 'direct'
+               LIMIT 1""",
+            (company_slug, job_slug),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_postings_for_job(company_slug: str, job_slug: str) -> list[dict[str, Any]]:
+    """Get all postings (direct + agency) for a given job."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM postings WHERE company_slug = ? AND job_slug = ? "
+            "ORDER BY source_type, agency_name",
+            (company_slug, job_slug),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_postings() -> list[dict[str, Any]]:
+    """Get all postings — used by seek.jobs to display the full job board."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM postings ORDER BY company_slug, job_slug, source_type"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_next_cycle(student_id: int) -> int:
+    """Compute the next cycle number for a student.
+
+    Cycle 1 = first attempt. After completing or being rejected from one
+    journey, the student starts cycle 2 on their next application.
+
+    Logic: cycle = max(cycle of all applications) + 1 if last attempt
+    is finished (rejected/completed), else current max cycle.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT cycle, status FROM applications "
+            "WHERE student_id = ? ORDER BY cycle DESC, created_at DESC",
+            (student_id,),
+        ).fetchall()
+
+    if not rows:
+        return 1
+
+    max_cycle = rows[0]["cycle"]
+    # Are there any active applications in the latest cycle? If so, this
+    # is still the same cycle. Otherwise the student has finished and is
+    # starting fresh.
+    active_in_latest = any(
+        r["cycle"] == max_cycle and r["status"] == "active" for r in rows
+    )
+    return max_cycle if active_in_latest else max_cycle + 1
 
 
 def get_blocked_companies(student_id: int) -> list[str]:

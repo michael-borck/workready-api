@@ -49,6 +49,49 @@ def get_job_description(company_slug: str, job_slug: str) -> str:
     return job.get("description", "")
 
 
+def seed_postings_from_jobs() -> int:
+    """Create or update postings from loaded jobs. Returns count seeded.
+
+    For every loaded job:
+    - Always creates a 'direct' posting (the company's own listing)
+    - For any agency listings declared in jobs.json under
+      `additional_postings`, creates one posting per agency
+    """
+    from workready_api.db import upsert_posting
+
+    count = 0
+    for (company_slug, job_slug), job in _JOB_CACHE.items():
+        title = job.get("title", job_slug)
+        description = job.get("description", "")
+
+        # Direct posting
+        upsert_posting(
+            company_slug=company_slug,
+            job_slug=job_slug,
+            listing_title=title,
+            source_type="direct",
+            agency_name=None,
+            listing_description=description,
+            confidential=False,
+        )
+        count += 1
+
+        # Agency postings (if declared in jobs.json)
+        for ap in job.get("additional_postings", []) or []:
+            upsert_posting(
+                company_slug=company_slug,
+                job_slug=job_slug,
+                listing_title=ap.get("title", title),
+                source_type="agency",
+                agency_name=ap.get("agency", "Recruitment Agency"),
+                listing_description=ap.get("description", description),
+                confidential=bool(ap.get("confidential", False)),
+            )
+            count += 1
+
+    return count
+
+
 def get_interview_pipeline(company_slug: str, job_slug: str) -> list[dict]:
     """Get the interview pipeline for a job.
 

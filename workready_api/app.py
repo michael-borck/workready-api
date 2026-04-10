@@ -11,14 +11,15 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from workready_api.assessor import assess
+from workready_api.blocking import get_blocked_for_student
 from workready_api.db import (
     advance_stage,
     create_application,
     get_application,
-    get_blocked_companies,
     get_db,
     get_inbox,
     get_or_create_student,
+    get_posting,
     get_stage_results,
     get_student_applications,
     get_student_by_email,
@@ -27,12 +28,18 @@ from workready_api.db import (
     record_stage_result,
     set_application_status,
 )
-from workready_api.jobs import get_job, get_job_description, load_jobs
+from workready_api.jobs import (
+    get_job,
+    get_job_description,
+    load_jobs,
+    seed_postings_from_jobs,
+)
 from workready_api.notifications import NotifyContent, notify
 from workready_api.models import (
     ApplicationDetail,
     ApplicationSummary,
     AssessmentResult,
+    BlockedJob,
     Inbox,
     Message,
     StageResult,
@@ -56,6 +63,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
     sites_dir = Path(os.environ.get("SITES_DIR", str(Path(__file__).parent.parent.parent)))
     load_jobs(sites_dir, SITE_SLUGS)
+    # Auto-seed postings from loaded jobs (idempotent — safe on every startup)
+    seed_postings_from_jobs()
     yield
 
 
@@ -125,20 +134,40 @@ def health() -> dict:
 
 @app.post("/api/v1/resume", response_model=AssessmentResult)
 async def submit_resume(
-    company_slug: str = Form(...),
-    job_slug: str = Form(...),
+    company_slug: str = Form(""),
+    job_slug: str = Form(""),
     job_title: str = Form(...),
     applicant_name: str = Form(...),
     applicant_email: str = Form(...),
     cover_letter: str = Form(""),
     source: str = Form("direct"),
+    posting_id: int | None = Form(None),
     resume: UploadFile = File(...),
 ) -> AssessmentResult:
     """Stage 2 — Submit a resume for assessment.
 
     Creates a student record (if new), creates an application,
     assesses the resume, and records the result.
+
+    If posting_id is provided, the company_slug/job_slug are resolved
+    from the posting (so confidential agency listings don't expose the
+    real company in the form payload). If not provided, falls back to
+    the company_slug/job_slug params (legacy direct apply forms).
     """
+    # Resolve posting if specified
+    posting = None
+    if posting_id is not None:
+        posting = get_posting(posting_id)
+        if posting:
+            company_slug = posting["company_slug"]
+            job_slug = posting["job_slug"]
+
+    if not company_slug or not job_slug:
+        raise HTTPException(
+            status_code=400,
+            detail="Either posting_id or (company_slug, job_slug) is required",
+        )
+
     # Extract text from uploaded PDF
     pdf_bytes = await resume.read()
     resume_text = extract_text(pdf_bytes)
@@ -157,13 +186,19 @@ async def submit_resume(
     # Persist student, application, and stage result
     student = get_or_create_student(applicant_email, applicant_name)
 
+    # Determine the effective source from the posting type
+    effective_source = source
+    if posting:
+        effective_source = "agency" if posting["source_type"] == "agency" else source
+
     application_id = create_application(
         student_id=student["id"],
         student_email=applicant_email,
         company_slug=company_slug,
         job_slug=job_slug,
         job_title=job_title,
-        source=source,
+        source=effective_source,
+        posting_id=posting_id,
     )
 
     record_stage_result(
@@ -174,20 +209,31 @@ async def submit_resume(
         feedback=result.feedback.model_dump(),
     )
 
+    # Determine display title and sender for the confirmation message.
+    # Confidential agency listings keep the company hidden until interview.
+    is_confidential = bool(posting and posting.get("confidential"))
+    is_agency = bool(posting and posting["source_type"] == "agency")
+    agency_name = posting["agency_name"] if is_agency else None
+    listing_title = posting["listing_title"] if posting else job_title
+
     # Confirmation notification (immediate)
+    confirmation_sender = (
+        f"{agency_name}" if is_agency else "seek.jobs"
+    )
+    confirmation_via = f" (via {agency_name})" if is_agency else ""
     notify(
         student_email=applicant_email,
         event="application_received",
         content=NotifyContent(
-            sender_name="seek.jobs",
-            sender_role="Application System",
-            subject=f"Application received — {job_title}",
+            sender_name=confirmation_sender,
+            sender_role="Recruitment" if is_agency else "Application System",
+            subject=f"Application received — {listing_title}",
             body=(
                 f"Hi {applicant_name},\n\n"
-                f"Thank you for applying for the {job_title} position. "
+                f"Thank you for applying for the {listing_title} position{confirmation_via}. "
                 f"We have received your application and it is now under review. "
                 f"You will hear back from us shortly.\n\n"
-                f"— seek.jobs"
+                f"— {confirmation_sender}"
             ),
             application_id=application_id,
             related_stage="resume",
@@ -202,15 +248,25 @@ async def submit_resume(
 
     if result.proceed_to_interview:
         advance_stage(application_id, "interview")
+        # Interview invitation always reveals the actual company —
+        # this is the dramatic reveal moment for confidential listings.
+        reveal_intro = ""
+        if is_confidential:
+            reveal_intro = (
+                f"We're delighted to share that the role you applied for is at "
+                f"**{company_name}**. We can now disclose the full details of "
+                f"the opportunity and the team you'd be joining.\n\n"
+            )
         notify(
             student_email=applicant_email,
             event="interview_invitation",
             content=NotifyContent(
                 sender_name=f"{company_name} HR",
                 sender_role="Recruitment Team",
-                subject=f"Interview invitation — {job_title}",
+                subject=f"Interview invitation — {job_title} at {company_name}",
                 body=(
                     f"Dear {applicant_name},\n\n"
+                    f"{reveal_intro}"
                     f"Thank you for your application for the {job_title} role at "
                     f"{company_name}. We were impressed by your application and "
                     f"would like to invite you to an interview.\n\n"
@@ -231,18 +287,33 @@ async def submit_resume(
     else:
         # Mark application as rejected so the company is "off the board"
         set_application_status(application_id, "rejected")
+        # Confidential listings keep the company hidden even on rejection —
+        # the student never finds out who they applied to (realistic for
+        # agency-mediated rejections)
+        reject_sender = agency_name if is_confidential else f"{company_name} HR"
+        reject_role = "Recruitment" if is_confidential else "Recruitment Team"
+        reject_subject = (
+            f"Update on your application — {listing_title}"
+            if is_confidential
+            else f"Update on your application — {job_title}"
+        )
+        reject_about = (
+            f"the {listing_title} position we were recruiting for"
+            if is_confidential
+            else f"the {job_title} role at {company_name}"
+        )
+        reject_signoff = agency_name if is_confidential else f"{company_name} Recruitment"
         notify(
             student_email=applicant_email,
             event="application_rejected",
             content=NotifyContent(
-                sender_name=f"{company_name} HR",
-                sender_role="Recruitment Team",
-                subject=f"Update on your application — {job_title}",
+                sender_name=reject_sender,
+                sender_role=reject_role,
+                subject=reject_subject,
                 body=(
                     f"Dear {applicant_name},\n\n"
-                    f"Thank you for your interest in the {job_title} role at "
-                    f"{company_name} and for taking the time to submit your "
-                    f"application.\n\n"
+                    f"Thank you for your interest in {reject_about} "
+                    f"and for taking the time to submit your application.\n\n"
                     f"After careful consideration, we have decided not to "
                     f"progress your application at this time. We've included "
                     f"detailed feedback below — review it carefully, then apply "
@@ -250,7 +321,7 @@ async def submit_resume(
                     f"{feedback_block}\n\n"
                     f"We wish you the best in your career.\n\n"
                     f"Best regards,\n"
-                    f"{company_name} Recruitment"
+                    f"{reject_signoff}"
                 ),
                 application_id=application_id,
                 related_stage="resume",
@@ -382,6 +453,8 @@ def get_student_state(email: str) -> StudentState:
     unread_personal = sum(1 for m in personal_msgs if not m.get("is_read"))
     unread_work = sum(1 for m in work_msgs if not m.get("is_read"))
 
+    blocked = get_blocked_for_student(student_id)
+
     return StudentState(
         email=email,
         name=student["name"],
@@ -393,7 +466,8 @@ def get_student_state(email: str) -> StudentState:
         ],
         unread_personal=unread_personal,
         unread_work=unread_work,
-        blocked_companies=get_blocked_companies(student_id),
+        blocked_companies=blocked["companies"],
+        blocked_jobs=[BlockedJob(**j) for j in blocked["jobs"]],
     )
 
 

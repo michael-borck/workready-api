@@ -73,6 +73,13 @@ class StudentProgress(BaseModel):
     applications: list[ApplicationSummary]
 
 
+class BlockedJob(BaseModel):
+    """A specific (company, job) blocked at the role level."""
+
+    company_slug: str
+    job_slug: str
+
+
 class StudentState(BaseModel):
     """High-level state for the portal — what the student should see."""
 
@@ -83,7 +90,10 @@ class StudentState(BaseModel):
     applications: list[ApplicationSummary]
     unread_personal: int = 0
     unread_work: int = 0
+    # Blocked companies (every role at this company is blocked)
     blocked_companies: list[str] = []
+    # Blocked specific roles (only this job is blocked, not the whole company)
+    blocked_jobs: list[BlockedJob] = []
 
 
 class Message(BaseModel):
