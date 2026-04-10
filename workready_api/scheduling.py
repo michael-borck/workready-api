@@ -198,29 +198,84 @@ def feedback_delivery_time(base_delay_minutes: int, jitter_minutes: int = 0) -> 
 # --- Business hours ---
 
 
-def is_business_day(dt: datetime) -> bool:
-    """True if dt (local) is a configured business day and not a public holiday.
+@dataclass
+class BusinessHoursConfig:
+    """Business hours for a company (or the global default)."""
 
-    Mon=1 ... Sun=7
+    start: int
+    end: int
+    days: list[int]
+    description: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "BusinessHoursConfig":
+        """Build from a dict (e.g. from jobs.json), with global fallback."""
+        if not data:
+            return cls.global_default()
+        return cls(
+            start=int(data.get("start", BUSINESS_HOURS_START)),
+            end=int(data.get("end", BUSINESS_HOURS_END)),
+            days=data.get("days") or list(BUSINESS_DAYS),
+            description=data.get("description", ""),
+        )
+
+    @classmethod
+    def global_default(cls) -> "BusinessHoursConfig":
+        return cls(
+            start=BUSINESS_HOURS_START,
+            end=BUSINESS_HOURS_END,
+            days=list(BUSINESS_DAYS),
+            description="",
+        )
+
+    def human_summary(self) -> str:
+        """Human-readable summary like '7am–3pm Mon-Fri'."""
+        def fmt(h: int) -> str:
+            if h == 0:
+                return "12am"
+            if h == 12:
+                return "12pm"
+            if h < 12:
+                return f"{h}am"
+            return f"{h - 12}pm"
+
+        days_short = {
+            1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu",
+            5: "Fri", 6: "Sat", 7: "Sun",
+        }
+        day_names = [days_short.get(d, "") for d in self.days]
+        if len(day_names) >= 2 and day_names == [days_short[d] for d in range(self.days[0], self.days[-1] + 1)]:
+            days_str = f"{day_names[0]}-{day_names[-1]}"
+        else:
+            days_str = "/".join(day_names)
+        return f"{fmt(self.start)}–{fmt(self.end)} {days_str}"
+
+
+def is_business_day(dt: datetime, config: BusinessHoursConfig | None = None) -> bool:
+    """True if dt (local) is a business day and not a public holiday.
+
+    Mon=1 ... Sun=7. Uses global defaults if config not provided.
     """
+    cfg = config or BusinessHoursConfig.global_default()
     local = to_local(dt)
     iso_weekday = local.isoweekday()  # 1=Mon ... 7=Sun
-    if iso_weekday not in BUSINESS_DAYS:
+    if iso_weekday not in cfg.days:
         return False
     if is_public_holiday(local):
         return False
     return True
 
 
-def is_business_hour(dt: datetime) -> bool:
-    """True if dt (local) is within configured business hours."""
+def is_business_hour(dt: datetime, config: BusinessHoursConfig | None = None) -> bool:
+    """True if dt (local) is within business hours (global or company)."""
+    cfg = config or BusinessHoursConfig.global_default()
     local = to_local(dt)
-    return BUSINESS_HOURS_START <= local.hour < BUSINESS_HOURS_END
+    return cfg.start <= local.hour < cfg.end
 
 
-def is_business_time(dt: datetime) -> bool:
+def is_business_time(dt: datetime, config: BusinessHoursConfig | None = None) -> bool:
     """True if dt is both a business day and within business hours."""
-    return is_business_day(dt) and is_business_hour(dt)
+    return is_business_day(dt, config) and is_business_hour(dt, config)
 
 
 # --- Slot generation ---
@@ -259,17 +314,37 @@ class SlotPreferences:
         return cls(days=day_list, time_of_day=tod)
 
 
-def _matches_preferences(dt: datetime, prefs: SlotPreferences) -> bool:
-    """Check if a slot time matches the student's preferences."""
+def _matches_preferences(
+    dt: datetime,
+    prefs: SlotPreferences,
+    config: BusinessHoursConfig | None = None,
+) -> bool:
+    """Check if a slot time matches the student's preferences.
+
+    The preferences are applied within the company's business hours. So
+    if IronVale's hours are 7am-3pm, "morning" means 7am-noon and
+    "afternoon" means noon-3pm (rather than 9-12 / 12-5).
+    """
+    cfg = config or BusinessHoursConfig.global_default()
     local = to_local(dt)
     if local.isoweekday() not in prefs.days:
         return False
-    if prefs.time_of_day == "morning":
-        # Morning = before 12pm local
-        if local.hour >= 12:
+
+    # Split the business day at noon (or midway, if the business day
+    # doesn't span noon — e.g., early-morning shifts)
+    midday = 12
+    if cfg.end <= 12:
+        # Entire window is in the morning; only "morning" or "any" match
+        if prefs.time_of_day == "afternoon":
             return False
-    elif prefs.time_of_day == "afternoon":
-        if local.hour < 12:
+    elif cfg.start >= 12:
+        # Entire window is afternoon
+        if prefs.time_of_day == "morning":
+            return False
+    else:
+        if prefs.time_of_day == "morning" and local.hour >= midday:
+            return False
+        if prefs.time_of_day == "afternoon" and local.hour < midday:
             return False
     return True
 
@@ -292,6 +367,7 @@ def generate_slots(
     after: datetime | None = None,
     count: int = SLOTS_OFFERED,
     excluded: set[str] | None = None,
+    config: BusinessHoursConfig | None = None,
 ) -> list[datetime]:
     """Generate `count` interview slots matching preferences.
 
@@ -300,11 +376,13 @@ def generate_slots(
         after: don't offer slots before this UTC datetime (default: now + EARLIEST_BOOKING_HOURS)
         count: how many slots to return (max)
         excluded: ISO strings of slots to skip (already booked, already missed)
+        config: company-specific business hours; defaults to global
 
     Returns:
         List of UTC datetimes, in chronological order, that fit the preferences
         and lie within business hours and the booking window.
     """
+    cfg = config or BusinessHoursConfig.global_default()
     if excluded is None:
         excluded = set()
 
@@ -321,8 +399,8 @@ def generate_slots(
     while len(slots) < count and cursor <= latest and safety_iterations < max_iterations:
         safety_iterations += 1
         if (
-            is_business_time(cursor)
-            and _matches_preferences(cursor, prefs)
+            is_business_time(cursor, cfg)
+            and _matches_preferences(cursor, prefs, cfg)
             and to_iso(cursor) not in excluded
         ):
             slots.append(cursor)

@@ -9,6 +9,9 @@ from pathlib import Path
 # Job descriptions keyed by (company_slug, job_slug)
 _JOB_CACHE: dict[tuple[str, str], dict] = {}
 
+# Company-level metadata keyed by company_slug (business_hours, etc.)
+_COMPANY_CACHE: dict[str, dict] = {}
+
 
 def load_jobs(sites_dir: Path, site_slugs: list[str]) -> None:
     """Load all jobs.json files into the cache.
@@ -18,6 +21,7 @@ def load_jobs(sites_dir: Path, site_slugs: list[str]) -> None:
     - sites_dir/{slug}.json       (container — flat directory of exports)
     """
     _JOB_CACHE.clear()
+    _COMPANY_CACHE.clear()
     for slug in site_slugs:
         # Try site directory layout first, then flat layout
         jobs_file = sites_dir / slug / "jobs.json"
@@ -27,13 +31,38 @@ def load_jobs(sites_dir: Path, site_slugs: list[str]) -> None:
             continue
         with open(jobs_file) as f:
             data = json.load(f)
+
+        company_slug = data["company_slug"]
+        # Cache company-level metadata (business hours, etc.)
+        company_meta: dict = {
+            "company": data["company"],
+            "company_slug": company_slug,
+            "company_url": data.get("company_url", ""),
+        }
+        if "business_hours" in data:
+            company_meta["business_hours"] = data["business_hours"]
+        _COMPANY_CACHE[company_slug] = company_meta
+
         for job in data["jobs"]:
-            key = (data["company_slug"], job["slug"])
+            key = (company_slug, job["slug"])
             _JOB_CACHE[key] = {
                 "company": data["company"],
-                "company_slug": data["company_slug"],
+                "company_slug": company_slug,
                 **job,
             }
+
+
+def get_company(company_slug: str) -> dict | None:
+    """Look up company-level metadata."""
+    return _COMPANY_CACHE.get(company_slug)
+
+
+def get_company_business_hours(company_slug: str) -> dict | None:
+    """Return per-company business_hours override dict, or None if not set."""
+    company = _COMPANY_CACHE.get(company_slug)
+    if not company:
+        return None
+    return company.get("business_hours")
 
 
 def get_job(company_slug: str, job_slug: str) -> dict | None:

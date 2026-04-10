@@ -50,6 +50,7 @@ from workready_api.interview import (
 )
 from workready_api import scheduling
 from workready_api.jobs import (
+    get_company_business_hours,
     get_job,
     get_job_description,
     load_jobs,
@@ -830,23 +831,19 @@ def get_practice_script(company_slug: str, job_slug: str) -> Response:
 # --- Interview booking ---
 
 
-def _format_business_hours_human() -> str:
-    """Human-readable business hours summary for the UI."""
-    days_short = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun"}
-    day_names = [days_short.get(d, "") for d in scheduling.BUSINESS_DAYS]
-    days = "-".join([day_names[0], day_names[-1]]) if len(day_names) >= 2 else day_names[0]
-    start_h = scheduling.BUSINESS_HOURS_START
-    end_h = scheduling.BUSINESS_HOURS_END
+def _company_hours_config(company_slug: str) -> scheduling.BusinessHoursConfig:
+    """Look up the business hours config for a company, with global fallback."""
+    override = get_company_business_hours(company_slug)
+    return scheduling.BusinessHoursConfig.from_dict(override)
 
-    def fmt(h: int) -> str:
-        if h == 0:
-            return "12am"
-        if h == 12:
-            return "12pm"
-        if h < 12:
-            return f"{h}am"
-        return f"{h - 12}pm"
-    return f"{fmt(start_h)}–{fmt(end_h)} {days}"
+
+def _format_business_hours_human(company_slug: str | None = None) -> str:
+    """Human-readable business hours summary. Company-specific if slug given."""
+    if company_slug:
+        cfg = _company_hours_config(company_slug)
+    else:
+        cfg = scheduling.BusinessHoursConfig.global_default()
+    return cfg.human_summary()
 
 
 def _try_use_reschedule(application_id: int, app_data: dict) -> int:
@@ -1139,8 +1136,13 @@ def get_booking_slots(
             detail="Interview booking is disabled in this environment",
         )
 
+    company_slug = app_data.get("company_slug", "")
+    cfg = _company_hours_config(company_slug)
     prefs = scheduling.SlotPreferences.from_query(days, time_of_day)
-    raw_slots = scheduling.generate_slots(prefs)
+    # Default the preference days to the company's business days if the
+    # student didn't specify (or specified days the company doesn't do)
+    prefs.days = [d for d in prefs.days if d in cfg.days] or list(cfg.days)
+    raw_slots = scheduling.generate_slots(prefs, config=cfg)
 
     slots = [
         SlotOption(
@@ -1154,7 +1156,7 @@ def get_booking_slots(
         application_id=application_id,
         slots=slots,
         timezone=scheduling.TIMEZONE_NAME,
-        business_hours=_format_business_hours_human(),
+        business_hours=_format_business_hours_human(company_slug),
     )
 
 
@@ -1185,16 +1187,19 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
             detail="Too many missed interviews — this application is closed",
         )
 
-    # Validate the requested time
+    # Validate the requested time against the company's business hours
     try:
         scheduled = scheduling.from_iso(req.scheduled_at)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid time: {exc}") from exc
 
-    if not scheduling.is_business_time(scheduled):
+    company_slug = app_data.get("company_slug", "")
+    cfg = _company_hours_config(company_slug)
+    if not scheduling.is_business_time(scheduled, cfg):
         raise HTTPException(
             status_code=400,
-            detail="Selected time is outside business hours",
+            detail=f"Selected time is outside this company's business hours "
+                   f"({cfg.human_summary()})",
         )
     if scheduled < scheduling.now_utc():
         raise HTTPException(status_code=400, detail="Selected time is in the past")

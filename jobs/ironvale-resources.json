@@ -66,5 +66,18 @@
         }
       ]
     }
-  ]
+  ],
+  "business_hours": {
+    "start": 7,
+    "end": 15,
+    "days": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "timezone": null,
+    "description": "Mining schedule \u2014 early starts"
+  }
 }
