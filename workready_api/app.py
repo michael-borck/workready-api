@@ -128,6 +128,11 @@ app.add_middleware(
 )
 
 
+# Mount admin / debug router (gated by WORKREADY_ADMIN_TOKEN)
+from workready_api.admin import router as admin_router  # noqa: E402
+app.include_router(admin_router)
+
+
 # --- Helpers ---
 
 
