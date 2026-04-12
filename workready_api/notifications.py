@@ -176,7 +176,6 @@ def _inapp_handler(student_email: str, content: NotifyContent) -> None:
     """Deliver to the student's personal in-app inbox."""
     student = get_student_by_email(student_email)
     if not student:
-        # Should not happen — notify() is always called for known students
         import logging
         logging.getLogger(__name__).warning(
             "in_app handler: no student found for email %s", student_email,
@@ -187,6 +186,7 @@ def _inapp_handler(student_email: str, content: NotifyContent) -> None:
         student_email=student_email,
         sender_name=content.sender_name,
         sender_role=content.sender_role,
+        sender_email=content.extra.get("sender_email", "noreply@workready.eduserver.au"),
         subject=content.subject,
         body=content.body,
         inbox="personal",
@@ -194,6 +194,7 @@ def _inapp_handler(student_email: str, content: NotifyContent) -> None:
         booking_id=content.booking_id,
         related_stage=content.related_stage,
         deliver_at=content.deliver_at,
+        thread_id=content.extra.get("thread_id"),
     )
 
 
