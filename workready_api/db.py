@@ -113,6 +113,16 @@ CREATE TABLE IF NOT EXISTS interview_bookings (
     created_at TEXT NOT NULL,
     completed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS message_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL REFERENCES messages(id),
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT 'application/pdf',
+    file_path TEXT NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
 """
 
 # Indexes — run AFTER migrations so any newly added columns exist
@@ -135,6 +145,8 @@ CREATE INDEX IF NOT EXISTS idx_applications_posting
     ON applications(posting_id);
 CREATE INDEX IF NOT EXISTS idx_interview_bookings_application
     ON interview_bookings(application_id);
+CREATE INDEX IF NOT EXISTS idx_message_attachments
+    ON message_attachments(message_id);
 """
 
 
@@ -267,6 +279,39 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # Note: we keep the old student_email columns for backwards compatibility.
     # They are no longer authoritative — the new code reads/writes student_id.
     # A future cleanup migration can drop them once we're confident.
+
+    # --- Migration 6: email system columns on messages ---
+    msg_cols = _table_columns(conn, "messages")
+
+    if "direction" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN direction TEXT NOT NULL DEFAULT 'inbound'"
+        )
+    if "sender_email" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN sender_email TEXT NOT NULL "
+            "DEFAULT 'noreply@workready.eduserver.au'"
+        )
+    if "recipient_email" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN recipient_email TEXT"
+        )
+    if "thread_id" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN thread_id INTEGER"
+        )
+    if "status" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'delivered'"
+        )
+    if "has_attachment" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN has_attachment INTEGER NOT NULL DEFAULT 0"
+        )
+    if "deleted_at" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN deleted_at TEXT"
+        )
 
 
 def _now() -> str:
@@ -743,13 +788,15 @@ def create_message(
     body: str,
     inbox: str = "personal",
     sender_role: str = "",
+    sender_email: str = "noreply@workready.eduserver.au",
     application_id: int | None = None,
     related_stage: str | None = None,
     deliver_at: str | None = None,
     student_email: str | None = None,
     booking_id: int | None = None,
+    thread_id: int | None = None,
 ) -> int:
-    """Create an inbox message. Returns the message ID.
+    """Create an inbound inbox message. Returns the message ID.
 
     student_email is kept as a denormalised column for legacy compatibility
     and is auto-resolved if not provided. booking_id ties the message to
@@ -765,13 +812,13 @@ def create_message(
         cursor = conn.execute(
             """INSERT INTO messages
                (student_id, student_email, inbox, sender_name, sender_role,
-                subject, body, application_id, booking_id, related_stage,
-                deliver_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sender_email, subject, body, application_id, booking_id,
+                related_stage, direction, thread_id, deliver_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inbound', ?, ?, ?)""",
             (
                 student_id, student_email, inbox, sender_name, sender_role,
-                subject, body, application_id, booking_id, related_stage,
-                deliver_at or now, now,
+                sender_email, subject, body, application_id, booking_id,
+                related_stage, thread_id, deliver_at or now, now,
             ),
         )
         return cursor.lastrowid  # type: ignore[return-value]
@@ -798,22 +845,172 @@ def get_inbox(
     inbox: str = "personal",
     include_undelivered: bool = False,
 ) -> list[dict[str, Any]]:
-    """Get messages in a student's inbox, ordered newest first."""
+    """Get inbound messages in a student's inbox, ordered newest first.
+
+    Excludes soft-deleted messages (deleted_at IS NOT NULL) unless
+    include_undelivered is True (admin dump mode).
+    """
     now = _now()
     with get_db() as conn:
         if include_undelivered:
             rows = conn.execute(
                 "SELECT * FROM messages WHERE student_id = ? AND inbox = ? "
-                "ORDER BY deliver_at DESC",
+                "AND direction = 'inbound' ORDER BY deliver_at DESC",
                 (student_id, inbox),
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM messages WHERE student_id = ? AND inbox = ? "
-                "AND deliver_at <= ? ORDER BY deliver_at DESC",
+                "AND direction = 'inbound' AND deliver_at <= ? "
+                "AND deleted_at IS NULL ORDER BY deliver_at DESC",
                 (student_id, inbox, now),
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_sent_messages(
+    student_id: int,
+) -> list[dict[str, Any]]:
+    """Get outbound messages sent by a student, ordered newest first."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE student_id = ? AND direction = 'outbound' "
+            "AND deleted_at IS NULL ORDER BY created_at DESC",
+            (student_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_outbound_message(
+    student_id: int,
+    student_email: str,
+    recipient_email: str,
+    subject: str,
+    body: str,
+    thread_id: int | None = None,
+    has_attachment: bool = False,
+    status: str = "delivered",
+) -> int:
+    """Create an outbound message (student → recipient). Returns message ID.
+
+    status is 'delivered' for valid recipients, 'bounced' for invalid ones.
+    """
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO messages
+               (student_id, student_email, inbox, sender_name, sender_role,
+                sender_email, subject, body, direction, recipient_email,
+                thread_id, status, has_attachment, is_read, deliver_at, created_at)
+               VALUES (?, ?, 'sent', ?, '', ?, ?, ?, 'outbound', ?,
+                       ?, ?, ?, 1, ?, ?)""",
+            (
+                student_id, student_email, student_email, student_email,
+                subject, body, recipient_email,
+                thread_id, status, int(has_attachment), now, now,
+            ),
+        )
+        msg_id = cursor.lastrowid
+
+        # If this is a reply, set the thread_id to the original message's id
+        # if no thread_id was provided
+        if thread_id is None and msg_id:
+            conn.execute(
+                "UPDATE messages SET thread_id = ? WHERE id = ?",
+                (msg_id, msg_id),
+            )
+
+        return msg_id  # type: ignore[return-value]
+
+
+def create_bounce_message(
+    student_id: int,
+    student_email: str,
+    original_recipient: str,
+    original_subject: str,
+    suggestion: str | None = None,
+) -> int:
+    """Create a bounce notification in the student's inbox."""
+    body = (
+        f"Delivery failed\n\n"
+        f"Your message to {original_recipient} could not be delivered. "
+        f"The address was not found in any company's directory.\n\n"
+        f"Original subject: {original_subject}\n"
+    )
+    if suggestion:
+        body += f"\nDid you mean: {suggestion}?\n"
+    body += (
+        "\nTip: Check the company website for correct contact details, "
+        "or browse the staff directory if you have access."
+    )
+
+    return create_message(
+        student_id=student_id,
+        student_email=student_email,
+        sender_name="Mail Delivery System",
+        sender_role="",
+        subject=f"Delivery failed: {original_recipient}",
+        body=body,
+        inbox="personal",
+    )
+
+
+def soft_delete_message(message_id: int) -> None:
+    """Soft-delete a message (set deleted_at timestamp)."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE messages SET deleted_at = ? WHERE id = ?",
+            (_now(), message_id),
+        )
+
+
+def get_message(message_id: int) -> dict[str, Any] | None:
+    """Get a single message by ID."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_thread(thread_id: int, student_id: int) -> list[dict[str, Any]]:
+    """Get all messages in a thread, ordered chronologically."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE thread_id = ? AND student_id = ? "
+            "AND deleted_at IS NULL ORDER BY created_at ASC",
+            (thread_id, student_id),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_attachment(
+    message_id: int,
+    filename: str,
+    file_path: str,
+    file_size: int,
+    content_type: str = "application/pdf",
+) -> int:
+    """Create an attachment record. Returns the attachment ID."""
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO message_attachments
+               (message_id, filename, content_type, file_path, file_size, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (message_id, filename, content_type, file_path, file_size, now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_attachments(message_id: int) -> list[dict[str, Any]]:
+    """Get all attachments for a message."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM message_attachments WHERE message_id = ?",
+            (message_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def mark_message_read(message_id: int) -> None:

@@ -99,6 +99,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     load_jobs(sites_dir, SITE_SLUGS)
     # Auto-seed postings from loaded jobs (idempotent — safe on every startup)
     seed_postings_from_jobs()
+    # Build the email address registry from loaded employee/company data
+    from workready_api.email_registry import build_registry
+    registry = build_registry()
+    import logging
+    logging.getLogger(__name__).info("Email registry: %d valid addresses", len(registry))
     yield
 
 
@@ -131,6 +136,10 @@ app.add_middleware(
 # Mount admin / debug router (gated by WORKREADY_ADMIN_TOKEN)
 from workready_api.admin import router as admin_router  # noqa: E402
 app.include_router(admin_router)
+
+# Mount in-app mail router (compose, send, reply, delete, sent box)
+from workready_api.mail import router as mail_router  # noqa: E402
+app.include_router(mail_router)
 
 
 # --- Helpers ---

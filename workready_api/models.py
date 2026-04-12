@@ -228,10 +228,16 @@ class Message(BaseModel):
     inbox: str
     sender_name: str
     sender_role: str | None = ""
+    sender_email: str = "noreply@workready.eduserver.au"
     subject: str
     body: str
     application_id: int | None = None
     related_stage: str | None = None
+    direction: str = "inbound"
+    recipient_email: str | None = None
+    thread_id: int | None = None
+    status: str = "delivered"
+    has_attachment: bool = False
     is_read: bool
     deliver_at: str
     created_at: str
