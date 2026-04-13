@@ -60,5 +60,31 @@
     ],
     "timezone": null,
     "description": "Community-friendly hours including early evening"
-  }
+  },
+  "task_templates": [
+    {
+      "title": "Volunteer recruitment flyer \u2014 youth employment program",
+      "difficulty": "easy",
+      "discipline": "community",
+      "estimated_hours": 3,
+      "brief": "One-page flyer to recruit volunteers for the youth employment pathways program \u2014 warm tone, clear ask, concrete commitment.",
+      "description": "Horizon is short on volunteers for the youth employment program. Draft a one-page flyer we can print and distribute through community centres and libraries. It should explain what we do, what volunteers actually do, the time commitment (2-3 hours per week for a 6-month stint), and who to contact. Keep it warm but honest \u2014 no corporate stock-photo energy. Include a short call to action and suggest one distribution channel we should try first."
+    },
+    {
+      "title": "Grant acquittal report \u2014 digital literacy program",
+      "difficulty": "medium",
+      "discipline": "finance",
+      "estimated_hours": 5,
+      "brief": "Draft a grant acquittal report for the digital literacy program \u2014 outcomes, spend vs budget, stories, lessons.",
+      "description": "One of our government grants for the digital literacy program is due for acquittal. Prepare a draft report covering: (1) quantitative outcomes against the original KPIs, (2) actual spend against the approved budget with variance explanations, (3) 2-3 short participant stories, and (4) lessons learned we want to carry into the next funding cycle. Keep it structured and honest \u2014 funders respond better to 'here's what didn't work and what we'll do differently' than to glossy spin."
+    },
+    {
+      "title": "Community consultation plan \u2014 regional expansion",
+      "difficulty": "hard",
+      "discipline": "community",
+      "estimated_hours": 8,
+      "brief": "Draft a consultation plan for expanding the youth employment program into a new regional town \u2014 stakeholders, risks, sequencing.",
+      "description": "We're considering expanding the youth employment program into a new regional town. Before we commit, we need to consult the community \u2014 and we need to do it properly, not as a tick-box. Draft a 2-3 page consultation plan covering: (1) the key stakeholders and how we'd engage each group (Traditional Owners first, then service providers, local employers, youth, families), (2) the risks of getting it wrong \u2014 both to the program and to trust in Horizon, (3) a realistic timeline from first contact to a go/no-go decision, and (4) what would cause us to walk away. Don't pretend consultation always ends in 'yes'."
+    }
+  ]
 }

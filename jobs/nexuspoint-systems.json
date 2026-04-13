@@ -74,5 +74,31 @@
         }
       ]
     }
+  ],
+  "task_templates": [
+    {
+      "title": "Client onboarding process documentation",
+      "difficulty": "easy",
+      "discipline": "operations",
+      "estimated_hours": 3,
+      "brief": "Document the onboarding process for a new managed services client \u2014 steps, owners, artefacts produced.",
+      "description": "We don't have a written onboarding process for new managed services clients \u2014 everyone knows how to do it but it lives in people's heads. Document the full process from 'contract signed' to 'first month review'. For each step include: who owns it, what gets produced, how long it typically takes, and what goes wrong when it's skipped. Aim for something a new hire could follow without supervision."
+    },
+    {
+      "title": "Security assessment client summary",
+      "difficulty": "medium",
+      "discipline": "cybersecurity",
+      "estimated_hours": 5,
+      "brief": "Review a mock security assessment report and prepare a client-facing summary with prioritised actions.",
+      "description": "A security assessment has come back for one of our clients \u2014 technical, dense, and not something the client's leadership team will read. Produce a 2-page client-facing summary covering: the overall risk picture in plain English, the top 5 findings prioritised by real-world risk (not CVSS score alone), what we recommend they fix in the next 30/60/90 days, and the cost-effort rough order for each. Do not scare the client unnecessarily and do not downplay real issues."
+    },
+    {
+      "title": "Cloud migration proposal \u2014 mid-market client",
+      "difficulty": "hard",
+      "discipline": "cloud",
+      "estimated_hours": 8,
+      "brief": "Scope a cloud migration proposal for a fictional 200-person mid-market client \u2014 approach, phases, costs, risks.",
+      "description": "A prospective client (a 200-person professional services firm running mostly on-premise Windows servers) is considering a cloud migration. Scope a proposal covering: (1) your recommended target architecture and why, (2) a phased migration approach (what goes first, what goes last, what we leave alone), (3) rough-order cost estimate for the migration itself and ongoing run-rate comparison, (4) the 3 biggest risks and how we'd mitigate them, and (5) what we'd need from the client to succeed. Be honest about what you don't know \u2014 this is a scoping proposal, not a signed SOW."
+    }
   ]
 }

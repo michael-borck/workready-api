@@ -33,7 +33,7 @@ def load_jobs(sites_dir: Path, site_slugs: list[str]) -> None:
             data = json.load(f)
 
         company_slug = data["company_slug"]
-        # Cache company-level metadata (business hours, etc.)
+        # Cache company-level metadata (business hours, task templates, etc.)
         company_meta: dict = {
             "company": data["company"],
             "company_slug": company_slug,
@@ -41,6 +41,8 @@ def load_jobs(sites_dir: Path, site_slugs: list[str]) -> None:
         }
         if "business_hours" in data:
             company_meta["business_hours"] = data["business_hours"]
+        if "task_templates" in data:
+            company_meta["task_templates"] = data["task_templates"]
         _COMPANY_CACHE[company_slug] = company_meta
 
         for job in data["jobs"]:
@@ -76,6 +78,41 @@ def get_job_description(company_slug: str, job_slug: str) -> str:
     if not job:
         return ""
     return job.get("description", "")
+
+
+def get_company_task_templates(company_slug: str) -> list[dict]:
+    """Return the list of task templates declared in the company brief."""
+    company = _COMPANY_CACHE.get(company_slug)
+    if not company:
+        return []
+    return company.get("task_templates", []) or []
+
+
+def seed_task_templates_from_jobs() -> int:
+    """Upsert task templates from loaded jobs into the DB. Returns count seeded.
+
+    Idempotent — uniqueness on (company_slug, title) means re-runs update
+    fields rather than duplicating rows.
+    """
+    from workready_api.db import upsert_task_template
+
+    count = 0
+    for company_slug, company in _COMPANY_CACHE.items():
+        for tpl in company.get("task_templates", []) or []:
+            title = tpl.get("title", "").strip()
+            if not title:
+                continue
+            upsert_task_template(
+                company_slug=company_slug,
+                title=title,
+                brief=tpl.get("brief", ""),
+                description=tpl.get("description", ""),
+                difficulty=(tpl.get("difficulty") or "medium").lower(),
+                discipline=tpl.get("discipline"),
+                estimated_hours=int(tpl.get("estimated_hours", 4)),
+            )
+            count += 1
+    return count
 
 
 def seed_postings_from_jobs() -> int:

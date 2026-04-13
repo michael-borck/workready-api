@@ -16,30 +16,41 @@ from workready_api.blocking import get_blocked_for_student
 from workready_api.db import (
     advance_stage,
     append_interview_message,
+    cancel_task_deadline_event,
     complete_interview_session,
     create_application,
     create_booking,
     create_interview_session,
+    create_task_submission,
     delete_pending_messages_for_booking,
     get_active_booking,
     get_all_postings,
     get_application,
     get_bookings_for_application,
+    get_calendar_event,
     get_db,
     get_inbox,
     get_interview_session,
+    get_latest_submission,
     get_or_create_student,
     get_posting,
     get_stage_results,
     get_student_applications,
     get_student_by_email,
+    get_task,
     increment_missed_interviews,
     increment_reschedule_count,
     init_db,
+    list_calendar_events,
+    list_prior_task_history,
+    list_tasks_for_application,
     mark_message_read,
+    mark_task_reviewed,
+    mark_task_submitted,
     record_stage_result,
     set_application_status,
     update_booking_status,
+    update_calendar_event_status,
 )
 from workready_api.interview import (
     TARGET_TURNS,
@@ -55,7 +66,13 @@ from workready_api.jobs import (
     get_job_description,
     load_jobs,
     seed_postings_from_jobs,
+    seed_task_templates_from_jobs,
 )
+from workready_api.placement import (
+    activate_work_placement,
+    reveal_next_task_after_submission,
+)
+from workready_api.task_reviewer import review_task_submission
 from workready_api.notifications import NotifyContent, notify
 from workready_api.models import (
     ApplicationDetail,
@@ -79,6 +96,13 @@ from workready_api.models import (
     StageResult,
     StudentProgress,
     StudentState,
+    CalendarEvent,
+    CalendarEventList,
+    TaskDetail,
+    TaskFeedback,
+    TaskList,
+    TaskSubmitResult,
+    TaskSummary,
 )
 from workready_api.pdf import extract_text
 
@@ -99,6 +123,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     load_jobs(sites_dir, SITE_SLUGS)
     # Auto-seed postings from loaded jobs (idempotent — safe on every startup)
     seed_postings_from_jobs()
+    # Auto-seed task templates from loaded jobs (idempotent — Stage 4)
+    seed_task_templates_from_jobs()
     # Build the email address registry from loaded employee/company data
     from workready_api.email_registry import build_registry
     registry = build_registry()
@@ -1790,13 +1816,24 @@ async def interview_end(session_id: int) -> InterviewSession:
     )
     feedback_block = _format_interview_feedback(feedback_dict, result.fit_score)
 
+    # Interview feedback + placement onboarding share one deliver_at so the
+    # HR note, the mentor's welcome, and the first task brief all land
+    # together after the configured delay (+ jitter). Pattern mirrors the
+    # resume flow's RESUME_FEEDBACK_DELAY_MINUTES handling above.
+    interview_deliver_at = scheduling.feedback_delivery_time(
+        scheduling.INTERVIEW_FEEDBACK_DELAY_MINUTES,
+        scheduling.INTERVIEW_FEEDBACK_DELAY_JITTER_MINUTES,
+    )
+
     if result.proceed_to_interview:
-        # Passed — advance to work_task stage. Stage 4 isn't built yet,
-        # but the state will sit there until it is.
+        # Passed — advance to work_task stage and activate placement:
+        # creates 3 gated tasks, flips status to hired, schedules the
+        # mentor's welcome + first task brief to deliver_at.
         advance_stage(application_id, "work_task")
+        activate_work_placement(application_id, interview_deliver_at)
         notify(
             student_email=student_email,
-            event="interview_invitation",  # reusing the event type for now
+            event="interview_passed",
             content=NotifyContent(
                 sender_name=f"{company_name} HR",
                 sender_role="Recruitment Team",
@@ -1805,16 +1842,16 @@ async def interview_end(session_id: int) -> InterviewSession:
                     f"Dear {student_name or 'Candidate'},\n\n"
                     f"Thank you for taking the time to interview for the "
                     f"{job_title} role at {company_name}. We enjoyed our "
-                    f"conversation and would like to invite you to the next "
-                    f"stage of our process.\n\n"
-                    f"You'll find the next steps in your WorkReady portal.\n\n"
-                    f"We look forward to working with you.\n\n"
+                    f"conversation and would like to welcome you to the team.\n\n"
+                    f"Your mentor will be in touch shortly with your first "
+                    f"brief — look out for it in your work inbox.\n\n"
                     f"Best regards,\n"
                     f"{company_name} Recruitment\n\n"
                     f"\n{feedback_block}"
                 ),
                 application_id=application_id,
                 related_stage="work_task",
+                deliver_at=interview_deliver_at,
             ),
         )
     else:
@@ -1842,6 +1879,7 @@ async def interview_end(session_id: int) -> InterviewSession:
                 ),
                 application_id=application_id,
                 related_stage="interview",
+                deliver_at=interview_deliver_at,
             ),
         )
 
@@ -1856,3 +1894,373 @@ def get_interview(session_id: int) -> InterviewSession:
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return _session_to_model(session)
+
+
+# --- Stage 4: Work tasks --------------------------------------------------
+
+
+def _effective_task_status(task: dict) -> str:
+    """Return the status a task should report to the student.
+
+    A submission's outcome is lazy-gated by review_deliver_at — until the
+    delay has elapsed, the student sees 'under_review' even though the
+    reviewer's JSON is already stored on the submission row.
+    """
+    status = task.get("status", "assigned")
+    if status == "submitted":
+        sub = get_latest_submission(task["id"])
+        if sub and sub.get("review_deliver_at"):
+            now = scheduling.to_iso(scheduling.now_utc())
+            if sub["review_deliver_at"] <= now and sub.get("review_status"):
+                # Outcome is ready to reveal — flip the task row and return it
+                mark_task_reviewed(task["id"], sub["review_status"])
+                return sub["review_status"]
+        return "under_review"
+    return status
+
+
+def _task_to_summary(task: dict) -> TaskSummary:
+    return TaskSummary(
+        id=task["id"],
+        sequence=task["sequence"],
+        title=task["title"],
+        brief=task["brief"],
+        difficulty=task["difficulty"],
+        status=_effective_task_status(task),
+        visible_at=task.get("visible_at"),
+        due_at=task.get("due_at"),
+        submitted_at=task.get("submitted_at"),
+        reviewed_at=task.get("reviewed_at"),
+    )
+
+
+@app.get("/api/v1/tasks/application/{application_id}", response_model=TaskList)
+def list_tasks(application_id: int) -> TaskList:
+    """List all visible tasks for an application (hides gated tasks)."""
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    tasks = list_tasks_for_application(application_id, only_visible=True)
+    return TaskList(
+        application_id=application_id,
+        total=len(tasks),
+        tasks=[_task_to_summary(t) for t in tasks],
+    )
+
+
+def _task_to_detail(task: dict) -> TaskDetail:
+    status = _effective_task_status(task)
+    detail = TaskDetail(
+        id=task["id"],
+        sequence=task["sequence"],
+        title=task["title"],
+        brief=task["brief"],
+        description=task["description"],
+        difficulty=task["difficulty"],
+        status=status,
+        visible_at=task.get("visible_at"),
+        due_at=task.get("due_at"),
+        submitted_at=task.get("submitted_at"),
+        reviewed_at=task.get("reviewed_at"),
+    )
+    sub = get_latest_submission(task["id"])
+    if sub:
+        detail.submission_body = sub.get("body")
+        detail.attachment_filename = sub.get("attachment_filename")
+        # Only reveal score/feedback if the delay has elapsed
+        now = scheduling.to_iso(scheduling.now_utc())
+        if (sub.get("review_deliver_at") or "") <= now:
+            detail.score = sub.get("score")
+            fb = sub.get("feedback")
+            if fb:
+                detail.feedback = TaskFeedback(
+                    strengths=fb.get("strengths", []),
+                    improvements=fb.get("improvements", []),
+                    summary=fb.get("summary", ""),
+                )
+    return detail
+
+
+@app.get("/api/v1/tasks/{task_id}", response_model=TaskDetail)
+def get_task_detail(task_id: int) -> TaskDetail:
+    """Get full detail for a single task (description + latest submission)."""
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    # Gated tasks are 404 to the student — they shouldn't know they exist
+    if not task.get("visible_at"):
+        raise HTTPException(status_code=404, detail="Task not found")
+    now = scheduling.to_iso(scheduling.now_utc())
+    if task["visible_at"] > now:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return _task_to_detail(task)
+
+
+@app.post("/api/v1/tasks/{task_id}/submit", response_model=TaskSubmitResult)
+async def submit_task(
+    task_id: int,
+    body: str = Form(...),
+    attachment: UploadFile | None = File(None),
+) -> TaskSubmitResult:
+    """Submit a work task. Runs the mentor reviewer, stores the outcome
+    lazily-gated behind TASK_FEEDBACK_DELAY, and reveals the next task
+    after TASK_NEXT_TASK_DELAY.
+    """
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    now_iso = scheduling.to_iso(scheduling.now_utc())
+    if not task.get("visible_at") or task["visible_at"] > now_iso:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task["status"] not in ("assigned", "resubmit"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task cannot be submitted in status '{task['status']}'",
+        )
+
+    # Optional PDF attachment → extract text for LLM context
+    attachment_text: str | None = None
+    attachment_filename: str | None = None
+    if attachment is not None:
+        pdf_bytes = await attachment.read()
+        if pdf_bytes:
+            attachment_filename = attachment.filename
+            try:
+                attachment_text = extract_text(pdf_bytes)
+            except Exception:  # noqa: BLE001
+                attachment_text = None
+
+    application_id = task["application_id"]
+    app_data = get_application(application_id) or {}
+    job = get_job(app_data.get("company_slug", ""), app_data.get("job_slug", "")) or {}
+    mentor_persona = job.get("manager_persona", "") or ""
+    company_name = job.get("company", "")
+    mentor_name = job.get("reports_to", "Your mentor")
+
+    # Build prior task history for the reviewer
+    history = list_prior_task_history(application_id, before_sequence=task["sequence"])
+
+    # Late flag
+    late_by_days = 0
+    due_at = task.get("due_at")
+    if due_at and due_at < now_iso:
+        try:
+            delta = scheduling.now_utc() - scheduling.from_iso(due_at)
+            late_by_days = max(0, delta.days)
+        except Exception:  # noqa: BLE001
+            late_by_days = 0
+
+    # Run the mentor reviewer (sync LLM call — the outcome is gated on read)
+    score, outcome, feedback = await review_task_submission(
+        manager_persona=mentor_persona,
+        company_name=company_name,
+        task_title=task["title"],
+        task_brief=task["brief"],
+        task_description=task["description"],
+        difficulty=task["difficulty"],
+        submission_body=body,
+        attachment_text=attachment_text,
+        prior_history=history,
+        late_by_days=late_by_days,
+    )
+
+    # Compute when the feedback is allowed to reveal
+    review_deliver_at = scheduling.feedback_delivery_time(
+        scheduling.TASK_FEEDBACK_DELAY_MINUTES,
+        scheduling.TASK_FEEDBACK_DELAY_JITTER_MINUTES,
+    )
+
+    # Persist the submission with its stored (but gated) outcome
+    create_task_submission(
+        task_id=task_id,
+        body=body,
+        score=score,
+        feedback=feedback.model_dump(),
+        review_status=outcome,
+        review_deliver_at=review_deliver_at,
+        attachment_filename=attachment_filename,
+        attachment_text=attachment_text,
+    )
+    mark_task_submitted(task_id)
+    # Mark the task's deadline calendar event as completed so the
+    # calendar view doesn't keep showing it as upcoming.
+    cancel_task_deadline_event(task_id)
+
+    # Reveal the next task (with its own small delay) — this normally
+    # lands BEFORE the feedback email, so the student starts the new
+    # task before the mentor's notes on the prior one arrive.
+    next_revealed = reveal_next_task_after_submission(application_id)
+    is_final_task = next_revealed is None
+
+    # Schedule the mentor's feedback email (lazy-delivered via deliver_at)
+    student = get_student_by_email(app_data.get("student_email", ""))
+    if student:
+        bullet = lambda items: "\n".join(f"  • {s}" for s in items) if items else "  • (none)"
+        if is_final_task:
+            closing_line = (
+                "That's your last task for this internship — good work "
+                "getting through them. I'll be in touch about the wrap-up "
+                "conversation shortly."
+            )
+        else:
+            closing_line = (
+                "Take these notes on board and carry them into your next "
+                "brief — that's how you'll get better, one task at a time."
+            )
+        feedback_body = (
+            f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
+            f"I've had a look at your submission for \"{task['title']}\".\n\n"
+            f"{feedback.summary}\n\n"
+            f"WHAT WORKED:\n{bullet(feedback.strengths)}\n\n"
+            f"WHAT TO STRENGTHEN NEXT TIME:\n{bullet(feedback.improvements)}\n\n"
+            f"Outcome: {outcome.upper()}  •  Score: {score}/100\n\n"
+            f"{closing_line}\n\n"
+            f"— {mentor_name}"
+        )
+        from workready_api.db import create_message
+        create_message(
+            student_id=student["id"],
+            student_email=student["email"],
+            sender_name=mentor_name,
+            sender_role=f"Your mentor at {company_name}",
+            subject=f"Feedback on your task — {task['title']}",
+            body=feedback_body,
+            inbox="work",
+            application_id=application_id,
+            related_stage="work_task",
+            deliver_at=review_deliver_at,
+        )
+
+        # Final-task handoff: the student has finished all work tasks.
+        # Advance the application stage so Stage 6 (exit interview) can
+        # pick it up when it's built. We skip over 'lunchroom' for now —
+        # Stage 5 will wire that in later. Also emit an in-app "work
+        # phase complete" message so the student has a clear signal.
+        #
+        # TODO stage 6: trigger_exit_interview(application_id) once built.
+        if is_final_task:
+            advance_stage(application_id, "exit_interview")
+            wrapup_body = (
+                f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
+                f"You've completed all of your work tasks at {company_name}. "
+                f"Before we wrap up your internship, we'll schedule a short "
+                f"exit conversation to reflect on what you learned and what "
+                f"you'd do differently. Someone will be in touch with the "
+                f"details shortly.\n\n"
+                f"Congratulations on getting through the program — take a "
+                f"moment to recognise that.\n\n"
+                f"— {company_name}"
+            )
+            create_message(
+                student_id=student["id"],
+                student_email=student["email"],
+                sender_name=f"{company_name}",
+                sender_role="HR",
+                subject=f"Work phase complete — {company_name}",
+                body=wrapup_body,
+                inbox="work",
+                application_id=application_id,
+                related_stage="exit_interview",
+                deliver_at=review_deliver_at,
+            )
+
+    # The response is deliberately lazy-gated too: until the feedback
+    # delay elapses, we report 'under_review' and no score/feedback.
+    review_ready = review_deliver_at <= scheduling.to_iso(scheduling.now_utc())
+    if review_ready:
+        return TaskSubmitResult(
+            task_id=task_id,
+            status=outcome,
+            score=score,
+            feedback=feedback,
+            message="Review ready.",
+        )
+    return TaskSubmitResult(
+        task_id=task_id,
+        status="under_review",
+        score=None,
+        feedback=None,
+        message="Your submission has been received. Your mentor will "
+                "review it and get back to you shortly.",
+    )
+
+
+# --- Stage 4c: Calendar ---------------------------------------------------
+
+
+def _event_to_model(row: dict) -> CalendarEvent:
+    return CalendarEvent(
+        id=row["id"],
+        event_type=row["event_type"],
+        title=row["title"],
+        description=row.get("description"),
+        scheduled_at=row["scheduled_at"],
+        status=row["status"],
+        related_id=row.get("related_id"),
+        created_at=row["created_at"],
+    )
+
+
+@app.get(
+    "/api/v1/calendar/application/{application_id}",
+    response_model=CalendarEventList,
+)
+def list_calendar(
+    application_id: int,
+    include_past: bool = True,
+) -> CalendarEventList:
+    """List calendar events for an application, chronologically.
+
+    include_past=False (query param) hides events whose scheduled_at is
+    in the past — useful for the portal's "upcoming" view.
+    """
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    rows = list_calendar_events(
+        application_id,
+        include_past=include_past,
+        include_cancelled=False,
+    )
+    return CalendarEventList(
+        application_id=application_id,
+        events=[_event_to_model(r) for r in rows],
+        total=len(rows),
+    )
+
+
+@app.post(
+    "/api/v1/calendar/event/{event_id}/accept",
+    response_model=CalendarEvent,
+)
+def accept_calendar_event(event_id: int) -> CalendarEvent:
+    """Accept an invitation-style calendar event (e.g. lunchroom)."""
+    event = get_calendar_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event["status"] not in ("upcoming",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Event cannot be accepted in status '{event['status']}'",
+        )
+    update_calendar_event_status(event_id, "accepted")
+    return _event_to_model(get_calendar_event(event_id) or event)
+
+
+@app.post(
+    "/api/v1/calendar/event/{event_id}/decline",
+    response_model=CalendarEvent,
+)
+def decline_calendar_event(event_id: int) -> CalendarEvent:
+    """Decline an invitation-style calendar event."""
+    event = get_calendar_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if event["status"] not in ("upcoming",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Event cannot be declined in status '{event['status']}'",
+        )
+    update_calendar_event_status(event_id, "declined")
+    return _event_to_model(get_calendar_event(event_id) or event)

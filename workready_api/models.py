@@ -249,3 +249,96 @@ class Inbox(BaseModel):
     inbox: str
     messages: list[Message]
     unread_count: int
+
+
+# --- Stage 4: Work tasks ---
+
+
+class TaskFeedback(BaseModel):
+    """Structured mentor feedback on a task submission."""
+
+    strengths: list[str] = []
+    improvements: list[str] = []
+    summary: str = ""
+
+
+class TaskSummary(BaseModel):
+    """A task as shown to the student in their task list."""
+
+    id: int
+    sequence: int
+    title: str
+    brief: str
+    difficulty: str
+    status: str  # assigned | submitted | passed | failed | resubmit | under_review
+    visible_at: str | None = None
+    due_at: str | None = None
+    submitted_at: str | None = None
+    reviewed_at: str | None = None
+
+
+class TaskDetail(BaseModel):
+    """Full task detail including the description and latest submission."""
+
+    id: int
+    sequence: int
+    title: str
+    brief: str
+    description: str
+    difficulty: str
+    status: str
+    visible_at: str | None = None
+    due_at: str | None = None
+    submitted_at: str | None = None
+    reviewed_at: str | None = None
+    score: int | None = None
+    feedback: TaskFeedback | None = None
+    submission_body: str | None = None
+    attachment_filename: str | None = None
+
+
+class TaskList(BaseModel):
+    """All visible tasks for an application."""
+
+    application_id: int
+    total: int
+    tasks: list[TaskSummary]
+
+
+class TaskSubmitResult(BaseModel):
+    """Response after submitting a task.
+
+    The outcome fields (score, status, feedback) may be null when the
+    feedback delay has not yet elapsed — the student sees 'under_review'
+    and the mentor's email lands later.
+    """
+
+    task_id: int
+    status: str  # under_review | passed | failed | resubmit
+    score: int | None = None
+    feedback: TaskFeedback | None = None
+    message: str = ""
+
+
+# --- Stage 4c: Calendar ---
+
+
+class CalendarEvent(BaseModel):
+    """A single calendar event."""
+
+    id: int
+    event_type: str  # task_deadline | lunchroom | exit_interview | custom
+    title: str
+    description: str | None = None
+    scheduled_at: str  # UTC ISO
+    status: str  # upcoming | accepted | declined | completed | cancelled
+    related_id: int | None = None
+    created_at: str
+
+
+class CalendarEventList(BaseModel):
+    """All calendar events for an application."""
+
+    application_id: int
+    events: list[CalendarEvent]
+    total: int

@@ -58,5 +58,31 @@
       "reports_to": "Ben Abbott",
       "manager_persona": "You are Ben Abbott, Coordinator \u2014 Parks & Sustainability at Metro Council WA.\n\nMetro Council WA is A metropolitan local government authority serving a population\nof approximately 85,000 residents across inner and middle\nsuburbs of Perth. Responsible for local roads, parks, waste\nmanagement, planning approvals, community facilities, libraries,\nand a growing suite of community development programs. Currently\nundergoing a digital transformation to modernise citizen services\nand internal operations.\n\n\nABOUT YOU:\nManages parks maintenance and the council's sustainability\nprograms \u2014 urban canopy, water-sensitive design, and the\nnew food waste composting trial. An environmental science\ngraduate who found his way to local government. Bridges\nthe indoor/outdoor staff divide.\n\n\nPERSONALITY:\n\n- Meticulous and thorough\n\n- Calm under pressure\n\n- Leads by example\n\n- Knowledge-sharing\n\n- Standards-driven\n\n\n- Practical and hands-on\n\n- Passionate about urban greening\n\n- Respected by outdoor crews\n\n\nYOUR KNOWLEDGE AREAS:\n\n- Domain-specific technical expertise\n\n- Industry best practices\n\n- Project execution and delivery\n\n- Quality assurance\n\n- Mentoring junior staff\n\n- Troubleshooting and problem resolution\n\n\n- Urban tree canopy management\n\n- Water-sensitive urban design\n\n- Waste management and circular economy\n\n- Climate adaptation for local government\n\n\nCOMMUNICATION STYLE:\nPrecise and knowledgeable. Shares expertise generously but knows limits.\nPractical and hands-on. Values preparation and planning. Can explain\ntechnical concepts clearly.\n\n\nCURRENT SITUATION:\nMetro Council is midway through a major digital transformation,\nmoving citizen services online and automating internal processes.\nThe project is broadly supported but creating friction between\ndigitally confident staff and those who joined council for\nface-to-face community work. Meanwhile, a state government\ndirective on housing density is creating intense community\npushback that is consuming councillor and staff time. The\ncouncil must balance transformation with community trust at\na moment when both are under pressure.\n\n\nYOUR PERSPECTIVE: Worried that higher density development will reduce green\nspace. Sees the sustainability programs as the positive\nstory council should be telling while density dominates\nthe headlines. Wants the digital transformation to help\nwith asset management for parks.\n\n\n\nREFERRALS:\n\n- For planning questions, suggest speaking with Farah Haddad\n\n- For community questions, suggest speaking with Tony Sparks\n\n- For finance questions, suggest speaking with Margaret Chen\n\n\n\nYOUR OPINIONS (express these naturally when relevant):\n\n- Higher density without more green space is a disaster for livability\n\n- The food waste trial could save $400k in landfill fees\n\n- Parks are the most used council service \u2014 fund them properly\n\n- Digital is fine for planning applications but trees still need people\n\n\n\nRULES:\n1. Stay in character as Ben Abbott at all times\n2. Only discuss what you would realistically know as Coordinator \u2014 Parks & Sustainability\n3. Never fabricate specific dates, prices, or commitments you haven't been told about\n4. If unsure, say so honestly \u2014 real employees don't know everything\n5. You are speaking with a student consultant/auditor \u2014 be helpful but realistic\n6. Do not break character or acknowledge being an AI\n\n\nADDITIONAL CONTEXT:\nWorried that higher density development will reduce green\nspace. Sees the sustainability programs as the positive\nstory council should be telling while density dominates\nthe headlines. Wants the digital transformation to help\nwith asset management for parks."
     }
+  ],
+  "task_templates": [
+    {
+      "title": "Community feedback summary \u2014 park upgrade",
+      "difficulty": "easy",
+      "discipline": "community",
+      "estimated_hours": 3,
+      "brief": "Summarise community feedback on a proposed park upgrade and surface the top themes for councillors.",
+      "description": "The council ran a community feedback survey on a proposed upgrade to a local park \u2014 180 responses, mostly free-text. Read through and produce a 1-2 page summary for councillors covering: the top 3-4 themes that came up repeatedly, any minority views worth surfacing, what the community seems to want prioritised, and anything they explicitly don't want. Don't flatten dissent \u2014 councillors need to hear it too."
+    },
+    {
+      "title": "Footpath renewal program \u2014 prioritisation framework",
+      "difficulty": "medium",
+      "discipline": "planning",
+      "estimated_hours": 6,
+      "brief": "Draft a prioritisation framework for the annual footpath renewal program \u2014 criteria, weights, worked example.",
+      "description": "The council gets more footpath renewal requests than the annual budget can cover, and at the moment prioritisation is ad hoc. Draft a framework covering: the criteria we should use (condition, safety, usage, equity across suburbs, disability access, etc.), the relative weight each gets, a scoring approach that a council officer can actually apply in 15 minutes, and one worked example on a real-sounding street. The goal is decisions defensible to ratepayers who ask 'why wasn't my street chosen'."
+    },
+    {
+      "title": "Heritage precinct development \u2014 council report",
+      "difficulty": "hard",
+      "discipline": "planning",
+      "estimated_hours": 8,
+      "brief": "Draft the council report for a contested development in a heritage precinct \u2014 options, community impact, recommendation.",
+      "description": "A developer has lodged an application for a 4-storey mixed-use building in the heart of a heritage precinct. The community is split. Draft the council report covering: (1) the application's compliance with the local planning scheme and heritage overlay, (2) the community consultation findings (including the split), (3) 2-3 realistic options (approve, approve with conditions, refuse) with the trade-offs of each, (4) your recommendation and the reasoning. Remember: this report becomes a public document. Anything you write could end up in the paper."
+    }
   ]
 }

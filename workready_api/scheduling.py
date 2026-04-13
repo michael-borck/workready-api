@@ -87,6 +87,28 @@ RESUME_FEEDBACK_DELAY_JITTER_MINUTES: int = _env_int(
 INTERVIEW_INVITATION_DELAY_MINUTES: int = _env_int(
     "INTERVIEW_INVITATION_DELAY_MINUTES", 0
 )
+INTERVIEW_FEEDBACK_DELAY_MINUTES: int = _env_int(
+    "INTERVIEW_FEEDBACK_DELAY_MINUTES", 0
+)
+INTERVIEW_FEEDBACK_DELAY_JITTER_MINUTES: int = _env_int(
+    "INTERVIEW_FEEDBACK_DELAY_JITTER_MINUTES", 0
+)
+
+# Stage 4: Work tasks
+TASKS_PER_STUDENT: int = _env_int("TASKS_PER_STUDENT", 3)
+TASK_DEADLINE_DAYS: int = _env_int("TASK_DEADLINE_DAYS", 7)
+# Delay between a task submission and the NEXT task becoming visible.
+# Should be smaller than TASK_FEEDBACK_DELAY so the next task appears first
+# and feedback on the prior task lands while the student is already at work.
+TASK_NEXT_TASK_DELAY_MINUTES: int = _env_int("TASK_NEXT_TASK_DELAY_MINUTES", 0)
+TASK_NEXT_TASK_DELAY_JITTER_MINUTES: int = _env_int(
+    "TASK_NEXT_TASK_DELAY_JITTER_MINUTES", 0
+)
+# Delay between a task submission and the mentor's review landing.
+TASK_FEEDBACK_DELAY_MINUTES: int = _env_int("TASK_FEEDBACK_DELAY_MINUTES", 0)
+TASK_FEEDBACK_DELAY_JITTER_MINUTES: int = _env_int(
+    "TASK_FEEDBACK_DELAY_JITTER_MINUTES", 0
+)
 
 
 # --- Public holidays ---

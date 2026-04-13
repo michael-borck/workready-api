@@ -123,6 +123,69 @@ CREATE TABLE IF NOT EXISTS message_attachments (
     file_size INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
+
+-- Stage 4: Work tasks ------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS task_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    brief TEXT NOT NULL,              -- one-line framing
+    description TEXT NOT NULL,        -- full markdown brief
+    discipline TEXT,                  -- finance, community, technology, etc.
+    difficulty TEXT NOT NULL,         -- easy | medium | hard
+    estimated_hours INTEGER NOT NULL DEFAULT 4,
+    created_at TEXT NOT NULL,
+    UNIQUE(company_slug, title)
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id INTEGER NOT NULL REFERENCES applications(id),
+    task_template_id INTEGER REFERENCES task_templates(id),
+    title TEXT NOT NULL,
+    brief TEXT NOT NULL,
+    description TEXT NOT NULL,
+    difficulty TEXT NOT NULL,
+    sequence INTEGER NOT NULL,        -- 1, 2, 3...
+    status TEXT NOT NULL DEFAULT 'pending',
+        -- pending (not yet visible) | assigned (visible, not submitted) |
+        -- submitted | passed | failed | resubmit
+    assigned_at TEXT NOT NULL,        -- row creation time (bookkeeping)
+    visible_at TEXT,                  -- when the student can see it (NULL = gated)
+    due_at TEXT,                      -- set when visible_at is set
+    submitted_at TEXT,
+    reviewed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES tasks(id),
+    body TEXT NOT NULL,
+    attachment_filename TEXT,
+    attachment_text TEXT,             -- extracted text from any uploaded PDF
+    score INTEGER,                    -- 0-100 (from LLM reviewer)
+    feedback_json TEXT,
+    review_status TEXT,               -- passed | failed | resubmit (pre-delivery)
+    review_deliver_at TEXT,           -- when the outcome is revealed (lazy gate)
+    created_at TEXT NOT NULL
+);
+
+-- Stage 4c: Calendar events ------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id INTEGER NOT NULL REFERENCES applications(id),
+    event_type TEXT NOT NULL,
+        -- task_deadline | lunchroom | exit_interview | custom
+    title TEXT NOT NULL,
+    description TEXT,
+    scheduled_at TEXT NOT NULL,       -- UTC ISO (when the event occurs)
+    status TEXT NOT NULL DEFAULT 'upcoming',
+        -- upcoming | accepted | declined | completed | cancelled
+    related_id INTEGER,               -- task_id / lunchroom_session_id / etc.
+    created_at TEXT NOT NULL
+);
 """
 
 # Indexes — run AFTER migrations so any newly added columns exist
@@ -147,6 +210,16 @@ CREATE INDEX IF NOT EXISTS idx_interview_bookings_application
     ON interview_bookings(application_id);
 CREATE INDEX IF NOT EXISTS idx_message_attachments
     ON message_attachments(message_id);
+CREATE INDEX IF NOT EXISTS idx_task_templates_company
+    ON task_templates(company_slug);
+CREATE INDEX IF NOT EXISTS idx_tasks_application
+    ON tasks(application_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_task_submissions_task
+    ON task_submissions(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_application
+    ON calendar_events(application_id, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_related
+    ON calendar_events(related_id, event_type);
 """
 
 
@@ -1016,6 +1089,371 @@ def mark_message_read(message_id: int) -> None:
     with get_db() as conn:
         conn.execute(
             "UPDATE messages SET is_read = 1 WHERE id = ?", (message_id,)
+        )
+
+
+# --- Stage 4: Work tasks --------------------------------------------------
+
+
+def upsert_task_template(
+    company_slug: str,
+    title: str,
+    brief: str,
+    description: str,
+    difficulty: str,
+    discipline: str | None = None,
+    estimated_hours: int = 4,
+) -> int:
+    """Insert or update a task template. Returns the template ID.
+
+    Uniqueness is on (company_slug, title) so re-running the seed is
+    idempotent and preserves the id used by existing tasks.
+    """
+    now = _now()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM task_templates WHERE company_slug = ? AND title = ?",
+            (company_slug, title),
+        ).fetchone()
+        if row:
+            conn.execute(
+                """UPDATE task_templates
+                   SET brief = ?, description = ?, difficulty = ?,
+                       discipline = ?, estimated_hours = ?
+                   WHERE id = ?""",
+                (brief, description, difficulty, discipline, estimated_hours, row["id"]),
+            )
+            return row["id"]
+        cursor = conn.execute(
+            """INSERT INTO task_templates
+               (company_slug, title, brief, description, discipline,
+                difficulty, estimated_hours, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (company_slug, title, brief, description, discipline,
+             difficulty, estimated_hours, now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def list_task_templates_for_company(
+    company_slug: str,
+    difficulty: str | None = None,
+) -> list[dict[str, Any]]:
+    """List task templates for a company, optionally filtered by difficulty."""
+    with get_db() as conn:
+        if difficulty:
+            rows = conn.execute(
+                "SELECT * FROM task_templates WHERE company_slug = ? "
+                "AND difficulty = ? ORDER BY id",
+                (company_slug, difficulty),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM task_templates WHERE company_slug = ? ORDER BY id",
+                (company_slug,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_task(
+    application_id: int,
+    task_template_id: int | None,
+    title: str,
+    brief: str,
+    description: str,
+    difficulty: str,
+    sequence: int,
+    visible_at: str | None,
+    due_at: str | None,
+) -> int:
+    """Create a work-task row for an application. Returns the task ID.
+
+    visible_at=None means the task is gated (not yet revealed to the student).
+    status is 'pending' until visible_at is set, 'assigned' once visible.
+    """
+    now = _now()
+    status = "assigned" if visible_at else "pending"
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO tasks
+               (application_id, task_template_id, title, brief, description,
+                difficulty, sequence, status, assigned_at, visible_at,
+                due_at, submitted_at, reviewed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
+            (application_id, task_template_id, title, brief, description,
+             difficulty, sequence, status, now, visible_at, due_at),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_task(task_id: int) -> dict[str, Any] | None:
+    """Look up a task by ID."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_tasks_for_application(
+    application_id: int,
+    *,
+    only_visible: bool = True,
+) -> list[dict[str, Any]]:
+    """Return tasks for an application, ordered by sequence.
+
+    only_visible=True hides tasks whose visible_at is NULL or in the future
+    (the student can't see them yet). only_visible=False returns everything
+    (used by placement logic and admin endpoints).
+    """
+    now = _now()
+    with get_db() as conn:
+        if only_visible:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE application_id = ? "
+                "AND visible_at IS NOT NULL AND visible_at <= ? "
+                "ORDER BY sequence",
+                (application_id, now),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE application_id = ? ORDER BY sequence",
+                (application_id,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_next_gated_task(application_id: int) -> dict[str, Any] | None:
+    """Return the next task in sequence that is still gated (visible_at IS NULL)."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE application_id = ? "
+            "AND visible_at IS NULL ORDER BY sequence LIMIT 1",
+            (application_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def reveal_task(task_id: int, visible_at: str, due_at: str) -> None:
+    """Flip a gated task to 'assigned' state with visibility and deadline."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE tasks SET status = 'assigned', visible_at = ?, due_at = ? "
+            "WHERE id = ?",
+            (visible_at, due_at, task_id),
+        )
+
+
+def mark_task_submitted(task_id: int) -> None:
+    """Mark a task as submitted (status + timestamp)."""
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE tasks SET status = 'submitted', submitted_at = ? WHERE id = ?",
+            (now, task_id),
+        )
+
+
+def mark_task_reviewed(task_id: int, status: str) -> None:
+    """Flip a task's status to the reviewed outcome (passed|failed|resubmit).
+
+    Called once the review_deliver_at has passed and the outcome is revealed.
+    For now we set reviewed_at immediately so the status update is deferred
+    only via the gated read helper (see get_tasks_with_lazy_reveal).
+    """
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE tasks SET status = ?, reviewed_at = ? WHERE id = ?",
+            (status, now, task_id),
+        )
+
+
+def create_task_submission(
+    task_id: int,
+    body: str,
+    score: int,
+    feedback: dict[str, Any],
+    review_status: str,
+    review_deliver_at: str,
+    attachment_filename: str | None = None,
+    attachment_text: str | None = None,
+) -> int:
+    """Create a submission row with stored review outcome (lazy-gated).
+
+    The review_status and score are persisted immediately but readers
+    should hide them until review_deliver_at <= now() — see
+    get_visible_submission().
+    """
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO task_submissions
+               (task_id, body, attachment_filename, attachment_text,
+                score, feedback_json, review_status, review_deliver_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, body, attachment_filename, attachment_text,
+             score, json.dumps(feedback), review_status, review_deliver_at, now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_latest_submission(task_id: int) -> dict[str, Any] | None:
+    """Return the most recent submission for a task (if any)."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM task_submissions WHERE task_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("feedback_json"):
+        try:
+            d["feedback"] = json.loads(d["feedback_json"])
+        except (ValueError, TypeError):
+            d["feedback"] = None
+    else:
+        d["feedback"] = None
+    return d
+
+
+def list_prior_task_history(
+    application_id: int, before_sequence: int,
+) -> list[dict[str, Any]]:
+    """Return tasks (with their latest submission) before a given sequence.
+
+    Used to give the mentor reviewer context on what the student has
+    already done in this internship.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE application_id = ? AND sequence < ? "
+            "ORDER BY sequence",
+            (application_id, before_sequence),
+        ).fetchall()
+    history: list[dict[str, Any]] = []
+    for r in rows:
+        task = dict(r)
+        task["submission"] = get_latest_submission(task["id"])
+        history.append(task)
+    return history
+
+
+# --- Stage 4c: Calendar events --------------------------------------------
+
+
+def create_calendar_event(
+    application_id: int,
+    event_type: str,
+    title: str,
+    scheduled_at: str,
+    description: str | None = None,
+    related_id: int | None = None,
+    status: str = "upcoming",
+) -> int:
+    """Create a calendar event for an application. Returns the event ID."""
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO calendar_events
+               (application_id, event_type, title, description,
+                scheduled_at, status, related_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (application_id, event_type, title, description,
+             scheduled_at, status, related_id, now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def upsert_calendar_event_for_task(
+    application_id: int,
+    task_id: int,
+    title: str,
+    scheduled_at: str,
+    description: str | None = None,
+) -> int:
+    """Create-or-update the task_deadline calendar event for a task.
+
+    Idempotent on (related_id=task_id, event_type='task_deadline') so
+    re-revealing a task or adjusting its deadline updates the existing
+    row rather than creating duplicates.
+    """
+    now = _now()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM calendar_events WHERE related_id = ? "
+            "AND event_type = 'task_deadline'",
+            (task_id,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE calendar_events SET title = ?, description = ?, "
+                "scheduled_at = ? WHERE id = ?",
+                (title, description, scheduled_at, row["id"]),
+            )
+            return row["id"]
+        cursor = conn.execute(
+            """INSERT INTO calendar_events
+               (application_id, event_type, title, description,
+                scheduled_at, status, related_id, created_at)
+               VALUES (?, 'task_deadline', ?, ?, ?, 'upcoming', ?, ?)""",
+            (application_id, title, description, scheduled_at, task_id, now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def list_calendar_events(
+    application_id: int,
+    *,
+    include_past: bool = True,
+    include_cancelled: bool = False,
+) -> list[dict[str, Any]]:
+    """List calendar events for an application, ordered by scheduled_at.
+
+    include_past=False filters out events whose scheduled_at is before now.
+    include_cancelled=False filters out cancelled events.
+    """
+    with get_db() as conn:
+        sql = "SELECT * FROM calendar_events WHERE application_id = ?"
+        params: list[Any] = [application_id]
+        if not include_past:
+            sql += " AND scheduled_at >= ?"
+            params.append(_now())
+        if not include_cancelled:
+            sql += " AND status != 'cancelled'"
+        sql += " ORDER BY scheduled_at ASC"
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_calendar_event(event_id: int) -> dict[str, Any] | None:
+    """Look up a single calendar event by ID."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM calendar_events WHERE id = ?", (event_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_calendar_event_status(event_id: int, status: str) -> None:
+    """Update a calendar event's status (accepted/declined/completed/cancelled)."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE calendar_events SET status = ? WHERE id = ?",
+            (status, event_id),
+        )
+
+
+def cancel_task_deadline_event(task_id: int) -> None:
+    """Mark a task's deadline event as completed (used after submission)."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE calendar_events SET status = 'completed' "
+            "WHERE related_id = ? AND event_type = 'task_deadline' "
+            "AND status = 'upcoming'",
+            (task_id,),
         )
 
 

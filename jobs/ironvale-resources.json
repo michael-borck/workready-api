@@ -79,5 +79,31 @@
     ],
     "timezone": null,
     "description": "Mining schedule \u2014 early starts"
-  }
+  },
+  "task_templates": [
+    {
+      "title": "Board briefing note \u2014 autonomous haulage trial",
+      "difficulty": "easy",
+      "discipline": "operations",
+      "estimated_hours": 3,
+      "brief": "One-page briefing note for the board on the current autonomous haulage trial \u2014 status, early findings, what's next.",
+      "description": "The board is reviewing the autonomous haulage trial at next month's meeting. Draft a one-page briefing note covering: current status of the trial, 2-3 early findings (good or bad), any safety observations, and what decision the board is actually being asked to make. Assume the board is commercially experienced but not operationally deep \u2014 translate jargon. Keep it tight: one page, scannable, honest."
+    },
+    {
+      "title": "Haul truck cycle time analysis",
+      "difficulty": "medium",
+      "discipline": "operations",
+      "estimated_hours": 6,
+      "brief": "Analyse haul truck cycle time data and identify three efficiency improvements worth trialling.",
+      "description": "Operations has shared a month of haul truck cycle time data (load, haul, dump, return, queue). Analyse the patterns and identify three specific efficiency improvements we could trial. For each, explain: what you observed in the data, what you'd change, the expected impact (even if rough), and any risk the change introduces. Don't just list obvious textbook improvements \u2014 tell us what this particular dataset is pointing at. Numbers beat adjectives."
+    },
+    {
+      "title": "Stakeholder communication plan \u2014 Goldfields lithium project",
+      "difficulty": "hard",
+      "discipline": "stakeholder_engagement",
+      "estimated_hours": 8,
+      "brief": "Draft a stakeholder communication plan for the Goldfields lithium project Traditional Owner consultation.",
+      "description": "IronVale is progressing the Goldfields lithium project and Traditional Owner consultation is the most important relationship we have. Draft a stakeholder communication plan covering: (1) the specific groups we need to engage and in what order, (2) the mode and cadence of engagement for each group, (3) the topics we should lead with (and the ones we should not dodge), (4) how we'll know consultation is genuinely working, and (5) the red lines \u2014 what would cause us to pause or change course. Assume anything you write could be read back to us in a land council meeting. Write accordingly."
+    }
+  ]
 }
