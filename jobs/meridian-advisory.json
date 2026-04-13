@@ -73,5 +73,37 @@
       "brief": "Draft an initial advisory memo for a mid-market client in financial distress \u2014 options, trade-offs, recommended path.",
       "description": "A mid-market client has come to us in genuine financial distress \u2014 cash runway of roughly 4 months, a major customer has not renewed, and the bank is watching. Draft an initial advisory memo covering: (1) the realistic options (informal workout, formal restructure, trade sale, wind-down), (2) the trade-offs of each for the owners, employees, and creditors, (3) your recommended path and the first 30 days of actions if they accept it, and (4) the hard conversations we'd need to have with the owners before they decide. This is the memo that would go in front of the partner before we pick up the phone."
     }
+  ],
+  "employees": [
+    {
+      "slug": "catherine-wu",
+      "name": "Catherine Wu",
+      "role": "Managing Partner",
+      "tier": "executive"
+    },
+    {
+      "slug": "daniel-okafor",
+      "name": "Daniel Okafor",
+      "role": "Partner \u2014 Operations & Digital",
+      "tier": "executive"
+    },
+    {
+      "slug": "mei-lin",
+      "name": "Mei Lin",
+      "role": "Director of Finance & Operations",
+      "tier": "manager"
+    },
+    {
+      "slug": "sasha-petrov",
+      "name": "Sasha Petrov",
+      "role": "Senior Consultant & Graduate Program Lead",
+      "tier": "specialist"
+    },
+    {
+      "slug": "raj-kapoor",
+      "name": "Raj Kapoor",
+      "role": "Partner \u2014 Government & Policy",
+      "tier": "executive"
+    }
   ]
 }

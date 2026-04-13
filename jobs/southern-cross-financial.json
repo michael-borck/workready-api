@@ -73,5 +73,37 @@
       "brief": "Draft an advisory memo for a high-net-worth client considering a major portfolio restructure ahead of retirement.",
       "description": "A long-standing high-net-worth client is 18 months from retirement and considering a major portfolio restructure \u2014 shifting more toward income, reducing concentration in one Australian bank stock they've held for 25 years, and setting up a structure for intergenerational transfer. Draft an advisory memo covering: (1) the strategic case for and against the restructure, (2) the tax implications of exiting the concentrated position (including CGT \u2014 run realistic numbers), (3) a recommended sequence of actions over the next 18 months, and (4) the non-financial considerations (family, legacy, risk tolerance now vs 25 years ago). This client trusts the firm. Don't betray that with a generic template."
     }
+  ],
+  "employees": [
+    {
+      "slug": "greg-morrison",
+      "name": "Greg Morrison",
+      "role": "Managing Director",
+      "tier": "executive"
+    },
+    {
+      "slug": "annabel-tan",
+      "name": "Annabel Tan",
+      "role": "Head of Compliance & Risk",
+      "tier": "executive"
+    },
+    {
+      "slug": "naomi-street",
+      "name": "Naomi Street",
+      "role": "Head of Financial Planning",
+      "tier": "manager"
+    },
+    {
+      "slug": "brendan-cole",
+      "name": "Brendan Cole",
+      "role": "Finance Manager",
+      "tier": "manager"
+    },
+    {
+      "slug": "lisa-kwan",
+      "name": "Lisa Kwan",
+      "role": "Client Experience & Marketing Manager",
+      "tier": "manager"
+    }
   ]
 }

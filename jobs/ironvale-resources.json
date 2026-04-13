@@ -105,5 +105,43 @@
       "brief": "Draft a stakeholder communication plan for the Goldfields lithium project Traditional Owner consultation.",
       "description": "IronVale is progressing the Goldfields lithium project and Traditional Owner consultation is the most important relationship we have. Draft a stakeholder communication plan covering: (1) the specific groups we need to engage and in what order, (2) the mode and cadence of engagement for each group, (3) the topics we should lead with (and the ones we should not dodge), (4) how we'll know consultation is genuinely working, and (5) the red lines \u2014 what would cause us to pause or change course. Assume anything you write could be read back to us in a land council meeting. Write accordingly."
     }
+  ],
+  "employees": [
+    {
+      "slug": "karen-whitfield",
+      "name": "Karen Whitfield",
+      "role": "Chief Operating Officer",
+      "tier": "executive"
+    },
+    {
+      "slug": "ravi-mehta",
+      "name": "Dr. Ravi Mehta",
+      "role": "General Manager \u2014 Sustainability & Environment",
+      "tier": "executive"
+    },
+    {
+      "slug": "brooke-lawson",
+      "name": "Brooke Lawson",
+      "role": "Health, Safety & Emergency Manager",
+      "tier": "manager"
+    },
+    {
+      "slug": "tom-gallagher",
+      "name": "Tom Gallagher",
+      "role": "Chief Financial Officer",
+      "tier": "executive"
+    },
+    {
+      "slug": "pete-drummond",
+      "name": "Pete Drummond",
+      "role": "Site Manager \u2014 Pilbara East",
+      "tier": "manager"
+    },
+    {
+      "slug": "danielle-keenan",
+      "name": "Danielle Keenan",
+      "role": "Head of People & Community",
+      "tier": "manager"
+    }
   ]
 }

@@ -86,5 +86,37 @@
       "brief": "Draft a consultation plan for expanding the youth employment program into a new regional town \u2014 stakeholders, risks, sequencing.",
       "description": "We're considering expanding the youth employment program into a new regional town. Before we commit, we need to consult the community \u2014 and we need to do it properly, not as a tick-box. Draft a 2-3 page consultation plan covering: (1) the key stakeholders and how we'd engage each group (Traditional Owners first, then service providers, local employers, youth, families), (2) the risks of getting it wrong \u2014 both to the program and to trust in Horizon, (3) a realistic timeline from first contact to a go/no-go decision, and (4) what would cause us to walk away. Don't pretend consultation always ends in 'yes'."
     }
+  ],
+  "employees": [
+    {
+      "slug": "maya-thompson",
+      "name": "Maya Thompson",
+      "role": "Chief Executive Officer",
+      "tier": "executive"
+    },
+    {
+      "slug": "jess-warburton",
+      "name": "Jess Warburton",
+      "role": "Programs Director",
+      "tier": "executive"
+    },
+    {
+      "slug": "craig-donovan",
+      "name": "Craig Donovan",
+      "role": "Finance & Operations Manager",
+      "tier": "manager"
+    },
+    {
+      "slug": "amara-osei",
+      "name": "Amara Osei",
+      "role": "Fundraising & Partnerships Manager",
+      "tier": "manager"
+    },
+    {
+      "slug": "pat-moriarty",
+      "name": "Pat Moriarty",
+      "role": "Volunteer & Community Coordinator",
+      "tier": "specialist"
+    }
   ]
 }

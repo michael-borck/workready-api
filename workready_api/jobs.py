@@ -33,7 +33,8 @@ def load_jobs(sites_dir: Path, site_slugs: list[str]) -> None:
             data = json.load(f)
 
         company_slug = data["company_slug"]
-        # Cache company-level metadata (business hours, task templates, etc.)
+        # Cache company-level metadata (business hours, task templates,
+        # employees for Stage 5 lunchroom participant picking).
         company_meta: dict = {
             "company": data["company"],
             "company_slug": company_slug,
@@ -43,6 +44,8 @@ def load_jobs(sites_dir: Path, site_slugs: list[str]) -> None:
             company_meta["business_hours"] = data["business_hours"]
         if "task_templates" in data:
             company_meta["task_templates"] = data["task_templates"]
+        if "employees" in data:
+            company_meta["employees"] = data["employees"]
         _COMPANY_CACHE[company_slug] = company_meta
 
         for job in data["jobs"]:

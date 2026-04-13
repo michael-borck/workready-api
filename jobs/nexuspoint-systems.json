@@ -100,5 +100,49 @@
       "brief": "Scope a cloud migration proposal for a fictional 200-person mid-market client \u2014 approach, phases, costs, risks.",
       "description": "A prospective client (a 200-person professional services firm running mostly on-premise Windows servers) is considering a cloud migration. Scope a proposal covering: (1) your recommended target architecture and why, (2) a phased migration approach (what goes first, what goes last, what we leave alone), (3) rough-order cost estimate for the migration itself and ongoing run-rate comparison, (4) the 3 biggest risks and how we'd mitigate them, and (5) what we'd need from the client to succeed. Be honest about what you don't know \u2014 this is a scoping proposal, not a signed SOW."
     }
+  ],
+  "employees": [
+    {
+      "slug": "alex-nguyen",
+      "name": "Alex Nguyen",
+      "role": "Managing Director & Co-founder",
+      "tier": "executive"
+    },
+    {
+      "slug": "priya-sharma",
+      "name": "Priya Sharma",
+      "role": "Head of Service Delivery",
+      "tier": "executive"
+    },
+    {
+      "slug": "marcus-webb",
+      "name": "Marcus Webb",
+      "role": "Cybersecurity Lead",
+      "tier": "manager"
+    },
+    {
+      "slug": "tanya-brooks",
+      "name": "Tanya Brooks",
+      "role": "Finance & Operations Manager",
+      "tier": "manager"
+    },
+    {
+      "slug": "liam-foster",
+      "name": "Liam Foster",
+      "role": "Senior Solutions Architect",
+      "tier": "specialist"
+    },
+    {
+      "slug": "jordan-reeves",
+      "name": "Jordan Reeves",
+      "role": "People & Culture Coordinator",
+      "tier": "specialist"
+    },
+    {
+      "slug": "sam-okoro",
+      "name": "Sam Okoro",
+      "role": "Service Desk Team Lead",
+      "tier": "specialist"
+    }
   ]
 }

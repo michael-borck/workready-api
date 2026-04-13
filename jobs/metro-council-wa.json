@@ -84,5 +84,43 @@
       "brief": "Draft the council report for a contested development in a heritage precinct \u2014 options, community impact, recommendation.",
       "description": "A developer has lodged an application for a 4-storey mixed-use building in the heart of a heritage precinct. The community is split. Draft the council report covering: (1) the application's compliance with the local planning scheme and heritage overlay, (2) the community consultation findings (including the split), (3) 2-3 realistic options (approve, approve with conditions, refuse) with the trade-offs of each, (4) your recommendation and the reasoning. Remember: this report becomes a public document. Anything you write could end up in the paper."
     }
+  ],
+  "employees": [
+    {
+      "slug": "helen-marchetti",
+      "name": "Helen Marchetti",
+      "role": "Chief Executive Officer",
+      "tier": "executive"
+    },
+    {
+      "slug": "aiden-cross",
+      "name": "Aiden Cross",
+      "role": "Director of Digital & Information Services",
+      "tier": "executive"
+    },
+    {
+      "slug": "farah-haddad",
+      "name": "Farah Haddad",
+      "role": "Director of Planning & Development",
+      "tier": "executive"
+    },
+    {
+      "slug": "margaret-chen",
+      "name": "Margaret Chen",
+      "role": "Director of Corporate Services & Finance",
+      "tier": "executive"
+    },
+    {
+      "slug": "tony-sparks",
+      "name": "Tony Sparks",
+      "role": "Manager \u2014 People, Culture & Community Engagement",
+      "tier": "manager"
+    },
+    {
+      "slug": "ben-abbott",
+      "name": "Ben Abbott",
+      "role": "Coordinator \u2014 Parks & Sustainability",
+      "tier": "specialist"
+    }
   ]
 }
