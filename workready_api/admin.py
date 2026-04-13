@@ -124,6 +124,22 @@ def list_students() -> dict:
     return {"students": students, "total": len(students)}
 
 
+@router.get("/applications/{application_id}/journey-report")
+def get_journey_report(application_id: int) -> dict:
+    """Lecturer-friendly journey report for a single application.
+
+    Per-stage breakdown with scores and qualitative feedback. Designed
+    for grading workflows — the lecturer reads this end-to-end and
+    makes the final mark themselves. No aggregate score, no AI
+    judgement layer on top of the existing assessor outputs.
+    """
+    from workready_api.journey_report import build_journey_report
+    report = build_journey_report(application_id)
+    if not report:
+        raise HTTPException(404, detail="Application not found")
+    return report
+
+
 @router.get("/students/{email}")
 def get_student_dump(email: str) -> dict:
     """Full state dump for a single student — applications, messages,

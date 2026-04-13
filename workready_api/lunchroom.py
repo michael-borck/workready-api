@@ -370,7 +370,7 @@ def create_invitation(
         student_email=student.get("email", application.get("student_email", "")),
         sender_name=inviter_name,
         sender_role=f"{inviter['role']} at {company_name}" if inviter.get("role") else company_name,
-        subject=f"Lunch this week? — {company_name}",
+        subject=_invitation_subject(occasion, occasion_detail, company_name),
         body=body,
         inbox="work",
         application_id=application_id,
@@ -386,6 +386,31 @@ def create_invitation(
         )
 
     return session_id
+
+
+def _invitation_subject(
+    occasion: str, detail: str | None, company_name: str,
+) -> str:
+    """Inbox subject line tailored to the occasion."""
+    if occasion == "task_celebration":
+        return f"Lunch on us — nice work this week"
+    if occasion == "birthday":
+        return (
+            f"Birthday lunch — come along"
+            if not detail
+            else f"Birthday lunch for {detail.split(' in ')[0]} — come along"
+        )
+    if occasion == "staff_award":
+        return f"Quick team lunch — bit of recognition to mark"
+    if occasion == "project_launch":
+        return f"Team lunch — small celebration"
+    if occasion == "cultural_event":
+        return (
+            f"Team lunch — marking {detail}"
+            if detail
+            else f"Team lunch this week — everyone welcome"
+        )
+    return f"Lunch this week? — {company_name}"
 
 
 def _occasion_blurb(occasion: str, detail: str | None) -> str:

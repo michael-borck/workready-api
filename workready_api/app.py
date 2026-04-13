@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -24,6 +25,8 @@ from workready_api.db import (
     create_task_submission,
     delete_pending_messages_for_booking,
     get_active_booking,
+    get_active_exit_interview,
+    get_active_performance_review,
     get_all_postings,
     get_application,
     get_bookings_for_application,
@@ -31,6 +34,7 @@ from workready_api.db import (
     get_db,
     get_inbox,
     get_interview_session,
+    get_next_cycle,
     get_latest_submission,
     get_lunchroom_session,
     get_or_create_student,
@@ -38,6 +42,7 @@ from workready_api.db import (
     get_stage_results,
     get_student_applications,
     get_student_by_email,
+    get_student_by_id,
     get_task,
     increment_missed_interviews,
     increment_reschedule_count,
@@ -54,7 +59,11 @@ from workready_api.db import (
     update_booking_status,
     update_calendar_event_status,
 )
+from workready_api import exit_interview as exit_interview_mod
 from workready_api import lunchroom as lunchroom_mod
+from workready_api import lunchroom_chat as lunchroom_chat_mod
+from workready_api import performance_review as performance_review_mod
+from workready_api.db import list_lunchroom_posts as db_list_lunchroom_posts
 from workready_api.interview import (
     TARGET_TURNS,
     WRAP_UP_AFTER,
@@ -106,6 +115,9 @@ from workready_api.models import (
     LunchroomSessionList,
     LunchroomSlot,
     LunchroomSlotPickRequest,
+    LunchroomPost,
+    LunchroomChatState,
+    LunchroomPostRequest,
     TaskDetail,
     TaskFeedback,
     TaskList,
@@ -197,8 +209,29 @@ SIMULATION_NOTE_HEADER = (
 )
 
 
-def _format_resume_feedback(feedback: dict, fit_score: int) -> str:
-    """Format the resume assessment feedback as a plain-text block."""
+def _format_resume_feedback(
+    feedback: dict, fit_score: int, *, proceed: bool = True,
+) -> str:
+    """Format the resume assessment feedback as a plain-text block.
+
+    The "next steps" footer branches on the outcome:
+    - proceed=True (interview invite coming): nudge toward Talk Buddy
+      practice for the upcoming interview
+    - proceed=False (rejected): nudge toward Career Compass to gap-analyze
+      a future application before reapplying
+    """
+    if proceed:
+        next_steps = (
+            "Want to practise for the interview? Download a practice script\n"
+            "from the WorkReady portal and use it with Talk Buddy or any AI\n"
+            "chat tool to rehearse before your next attempt."
+        )
+    else:
+        next_steps = (
+            "Before you reapply: open Career Compass on your computer, paste\n"
+            "the job description into its Gap Analysis page, and tighten the\n"
+            "gaps it surfaces. Faster than guessing what to fix."
+        )
     return (
         f"{SIMULATION_NOTE_HEADER}\n\n"
         f"YOUR APPLICATION SUMMARY\n"
@@ -212,9 +245,7 @@ def _format_resume_feedback(feedback: dict, fit_score: int) -> str:
         f"TAILORING ASSESSMENT\n"
         f"  {feedback.get('tailoring', '(none)')}\n\n"
         f"────────────────────────────────────────────────────────────\n"
-        f"Want to practise for similar roles? Download a practice script\n"
-        f"from the WorkReady portal and use it with Talk Buddy or any AI\n"
-        f"chat tool to rehearse before your next attempt."
+        f"{next_steps}"
     )
 
 
@@ -394,6 +425,19 @@ async def submit_resume(
     # Persist student, application, and stage result
     student = get_or_create_student(applicant_email, applicant_name)
 
+    # Lifecycle: enforce MAX_CYCLES — students can re-apply after a
+    # rejection, resign, or completion, but only up to a configured cap.
+    next_cycle = get_next_cycle(student["id"])
+    if next_cycle > scheduling.MAX_CYCLES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"You've reached the maximum of {scheduling.MAX_CYCLES} "
+                f"placement attempts for this program. Please speak to "
+                f"your lecturer if you'd like another chance."
+            ),
+        )
+
     # Determine the effective source from the posting type
     effective_source = source
     if posting:
@@ -452,7 +496,9 @@ async def submit_resume(
     job_meta = get_job(company_slug, job_slug)
     company_name = job_meta["company"] if job_meta else company_slug
     feedback_dict = result.feedback.model_dump()
-    feedback_block = _format_resume_feedback(feedback_dict, result.fit_score)
+    feedback_block = _format_resume_feedback(
+        feedback_dict, result.fit_score, proceed=result.proceed_to_interview,
+    )
 
     # Compute delivery time for the outcome message — by default this is
     # immediate, but if RESUME_FEEDBACK_DELAY_MINUTES is set the message
@@ -734,6 +780,76 @@ def get_application_detail(application_id: int) -> ApplicationDetail:
     )
 
 
+@app.post("/api/v1/application/{application_id}/resign")
+def resign_application(application_id: int) -> dict:
+    """Resign from a placement mid-stream.
+
+    Sets the application status to 'resigned' and drops a confirmation
+    message in the personal inbox. The student's NEXT_APPLIED state
+    becomes available for re-application (subject to MAX_CYCLES) and
+    the company is added to their blocked list — you can't quit a
+    placement and immediately reapply to the same employer.
+    """
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if app_data["status"] != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Application already in status '{app_data['status']}'",
+        )
+    if app_data["current_stage"] in ("resume", "interview"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Resign is only available once you've started the "
+                "placement (i.e. after passing the interview). For "
+                "earlier stages just stop applying — the application "
+                "will lapse on its own."
+            ),
+        )
+
+    set_application_status(application_id, "resigned")
+
+    job = get_job(app_data["company_slug"], app_data.get("job_slug", "")) or {}
+    company_name = job.get("company", app_data["company_slug"])
+    student = get_student_by_id(app_data["student_id"]) or {}
+    first_name = (student.get("name") or "").split()[0] or "there"
+
+    notify(
+        student_email=app_data.get("student_email", ""),
+        event="internship_complete",  # closest existing event
+        content=NotifyContent(
+            sender_name="WorkReady",
+            sender_role="Simulation guide",
+            subject=f"You've resigned from {company_name}",
+            body=(
+                f"Hi {first_name},\n\n"
+                f"Your placement at {company_name} has been marked as "
+                f"resigned. Resigning from a placement is a real and "
+                f"sometimes necessary thing — there's no judgement here.\n\n"
+                f"You can apply to a different company on the job board "
+                f"whenever you're ready. {company_name} is blocked for "
+                f"the rest of the program (you can't reapply to the same "
+                f"employer after leaving), but other roles are open.\n\n"
+                f"You have used {app_data.get('cycle', 1)} of "
+                f"{scheduling.MAX_CYCLES} placement attempts.\n\n"
+                f"— WorkReady"
+            ),
+            application_id=application_id,
+            related_stage="exit_interview",
+        ),
+    )
+
+    return {
+        "application_id": application_id,
+        "status": "resigned",
+        "cycles_used": app_data.get("cycle", 1),
+        "max_cycles": scheduling.MAX_CYCLES,
+        "can_reapply": app_data.get("cycle", 1) < scheduling.MAX_CYCLES,
+    }
+
+
 # --- Practice script (downloadable for Talk Buddy / any LLM tool) ---
 
 
@@ -870,6 +986,63 @@ def get_practice_script(company_slug: str, job_slug: str) -> Response:
     return Response(
         content=markdown,
         media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+# --- Talk Buddy scenario exports ---
+
+
+@app.get("/api/v1/practice/interview/{application_id}/talk-buddy.json")
+def export_interview_talk_buddy(application_id: int) -> Response:
+    """Download a Talk Buddy skill_package for the hiring interview.
+
+    Reuses the live interview's persona + resume context so the practice
+    run mirrors the real one.
+    """
+    from workready_api.talk_buddy_export import export_interview_package
+    payload = export_interview_package(application_id)
+    if not payload:
+        raise HTTPException(
+            status_code=404,
+            detail="Application or job not found",
+        )
+    app_data = get_application(application_id) or {}
+    slug = app_data.get("company_slug", "company")
+    job_slug = app_data.get("job_slug", "role")
+    filename = f"workready-interview-{slug}-{job_slug}.json"
+    return Response(
+        content=json.dumps(payload, indent=2),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@app.get("/api/v1/practice/lunchroom/{session_id}/talk-buddy.json")
+def export_lunchroom_talk_buddy(session_id: int) -> Response:
+    """Download a Talk Buddy skill_package for a lunchroom session.
+
+    Bundles one scenario per AI participant — the student can practise
+    1:1 small talk with each colleague before the real group lunch.
+    """
+    from workready_api.talk_buddy_export import export_lunchroom_package
+    payload = export_lunchroom_package(session_id)
+    if not payload:
+        raise HTTPException(
+            status_code=404,
+            detail="Lunchroom session not found or has no participants",
+        )
+    session = get_lunchroom_session(session_id) or {}
+    app_data = get_application(session.get("application_id", 0)) or {}
+    slug = app_data.get("company_slug", "company")
+    filename = f"workready-lunchroom-{slug}-{session_id}.json"
+    return Response(
+        content=json.dumps(payload, indent=2),
+        media_type="application/json",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
@@ -1904,6 +2077,383 @@ def get_interview(session_id: int) -> InterviewSession:
     return _session_to_model(session)
 
 
+# --- Stage 6: Exit interview ---
+
+
+def _exit_session_to_model(session: dict) -> InterviewSession:
+    """Map an exit-interview row onto the existing InterviewSession model.
+
+    Reuses the Stage 3 model so the portal can render both kinds with one
+    component. manager_name/role get the HR character; company/job pulled
+    from the application.
+    """
+    transcript = [InterviewMessage(**m) for m in (session.get("transcript") or [])]
+    turn = sum(1 for m in transcript if m.role == "user")
+    app_data = get_application(session["application_id"]) or {}
+    job = get_job(app_data.get("company_slug", ""), app_data.get("job_slug", "")) or {}
+    return InterviewSession(
+        session_id=session["id"],
+        application_id=session["application_id"],
+        manager_name=session["manager_name"],
+        manager_role="Head of People",
+        company_name=job.get("company", ""),
+        job_title=app_data.get("job_title", ""),
+        transcript=transcript,
+        turn=turn,
+        target_turns=exit_interview_mod.TARGET_TURNS,
+        status=session["status"],
+        feedback=session.get("feedback"),
+        final_score=session.get("final_score"),
+    )
+
+
+@app.post("/api/v1/exit/start", response_model=InterviewSession)
+async def exit_interview_start(req: InterviewStartRequest) -> InterviewSession:
+    """Start (or resume) the exit interview for a completed-tasks application.
+
+    Idempotent: if there's already an active or completed exit session
+    for this application, return it instead of creating a new one. The
+    student can re-enter a completed session to read the summary.
+    """
+    app_data = get_application(req.application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if app_data["current_stage"] != "exit_interview":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Application is at stage '{app_data['current_stage']}'. "
+                f"Finish your work tasks first."
+            ),
+        )
+
+    existing = get_active_exit_interview(req.application_id)
+    if existing:
+        return _exit_session_to_model(existing)
+
+    journey = exit_interview_mod.build_journey_context(req.application_id)
+    system_prompt = exit_interview_mod.build_exit_interview_system_prompt(journey)
+
+    session_id = create_interview_session(
+        application_id=req.application_id,
+        manager_slug="sam-reilly",
+        manager_name="Sam Reilly",
+        kind="exit",
+    )
+
+    opening = await exit_interview_mod.chat_completion_for_exit(system_prompt, [])
+    append_interview_message(session_id, "assistant", opening)
+
+    session = get_interview_session(session_id)
+    return _exit_session_to_model(session)
+
+
+@app.post("/api/v1/exit/message", response_model=InterviewMessageReply)
+async def exit_interview_message(
+    req: InterviewMessageRequest,
+) -> InterviewMessageReply:
+    """Send a student turn to the exit interviewer and get Sam's reply."""
+    session = get_interview_session(req.session_id)
+    if not session or session.get("kind") != "exit":
+        raise HTTPException(status_code=404, detail="Exit session not found")
+    if session["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    append_interview_message(req.session_id, "user", req.message.strip())
+
+    journey = exit_interview_mod.build_journey_context(session["application_id"])
+    system_prompt = exit_interview_mod.build_exit_interview_system_prompt(journey)
+
+    refreshed = get_interview_session(req.session_id) or session
+    transcript = refreshed.get("transcript", [])
+
+    reply = await exit_interview_mod.chat_completion_for_exit(
+        system_prompt, transcript,
+    )
+    append_interview_message(req.session_id, "assistant", reply)
+
+    refreshed = get_interview_session(req.session_id) or session
+    turn = sum(1 for m in refreshed.get("transcript", []) if m.get("role") == "user")
+    return InterviewMessageReply(
+        session_id=req.session_id,
+        reply=reply,
+        turn=turn,
+        target_turns=exit_interview_mod.TARGET_TURNS,
+        suggested_wrap_up=turn >= exit_interview_mod.WRAP_UP_AFTER,
+    )
+
+
+@app.post("/api/v1/exit/{session_id}/end", response_model=InterviewSession)
+async def exit_interview_end(session_id: int) -> InterviewSession:
+    """End the exit interview, run the assessment, and complete the placement.
+
+    Marks the application as 'completed' and the student state as
+    COMPLETED. Drops a warm summary message in the personal inbox so
+    the student has a permanent record of the conversation.
+    """
+    session = get_interview_session(session_id)
+    if not session or session.get("kind") != "exit":
+        raise HTTPException(status_code=404, detail="Exit session not found")
+    if session["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    application_id = session["application_id"]
+    journey = exit_interview_mod.build_journey_context(application_id)
+    transcript = session.get("transcript", [])
+
+    result = await exit_interview_mod.assess_exit_interview(
+        transcript=transcript, journey=journey,
+    )
+
+    feedback_dict = result.feedback.model_dump()
+    complete_interview_session(
+        session_id=session_id,
+        final_score=result.fit_score,
+        feedback={
+            "fit_score": result.fit_score,
+            "feedback": feedback_dict,
+            "summary": result.message,
+            "kind": "exit",
+        },
+    )
+
+    record_stage_result(
+        application_id=application_id,
+        stage="exit_interview",
+        status="passed",
+        score=result.fit_score,
+        feedback=feedback_dict,
+    )
+
+    # Flip the application to completed — the journey is over
+    set_application_status(application_id, "completed")
+
+    # Warm summary message in the personal inbox so the student has a
+    # permanent record. Sender is the simulation, not Sam — this is the
+    # wrap-up note, not another in-character message.
+    app_data = get_application(application_id) or {}
+    student_email = app_data.get("student_email", "")
+    company_name = journey.get("company_name", "")
+    notify(
+        student_email=student_email,
+        event="internship_complete",
+        content=NotifyContent(
+            sender_name="WorkReady",
+            sender_role="Simulation guide",
+            subject=f"Internship complete — {company_name}",
+            body=(
+                f"Hi {(journey.get('student_name') or '').split()[0] or 'there'},\n\n"
+                f"You've reached the end of your placement at {company_name}. "
+                f"Thanks for showing up through every stage — application, "
+                f"interview, work tasks, the lunch chats, and now the exit "
+                f"conversation.\n\n"
+                f"Sam's reflection on your conversation:\n\n"
+                f"{result.message}\n\n"
+                f"Your full journey is on file in your portal. Take a "
+                f"breath — you finished.\n\n"
+                f"— WorkReady"
+            ),
+            application_id=application_id,
+            related_stage="exit_interview",
+        ),
+    )
+
+    final = get_interview_session(session_id)
+    return _exit_session_to_model(final)
+
+
+@app.get("/api/v1/exit/application/{application_id}", response_model=InterviewSession)
+def get_exit_for_application(application_id: int) -> InterviewSession:
+    """Look up the active or most recent exit interview for an application.
+
+    Used by the portal to decide whether to show a 'resume' button or
+    a 'start' button on the exit interview view.
+    """
+    session = get_active_exit_interview(application_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="No exit interview yet")
+    return _exit_session_to_model(session)
+
+
+# --- Mid-placement performance review ---
+
+
+def _perf_review_session_to_model(session: dict) -> InterviewSession:
+    """Map a performance_review row onto the InterviewSession model.
+
+    Reuses the same model as the hiring/exit interviews so the portal
+    can render all three with one component shape.
+    """
+    transcript = [InterviewMessage(**m) for m in (session.get("transcript") or [])]
+    turn = sum(1 for m in transcript if m.role == "user")
+    app_data = get_application(session["application_id"]) or {}
+    job = get_job(app_data.get("company_slug", ""), app_data.get("job_slug", "")) or {}
+    return InterviewSession(
+        session_id=session["id"],
+        application_id=session["application_id"],
+        manager_name=session["manager_name"],
+        manager_role="Mentor",
+        company_name=job.get("company", ""),
+        job_title=app_data.get("job_title", ""),
+        transcript=transcript,
+        turn=turn,
+        target_turns=performance_review_mod.TARGET_TURNS,
+        status=session["status"],
+        feedback=session.get("feedback"),
+        final_score=session.get("final_score"),
+    )
+
+
+@app.post("/api/v1/perf-review/start", response_model=InterviewSession)
+async def perf_review_start(req: InterviewStartRequest) -> InterviewSession:
+    """Start (or resume) the mid-placement performance review.
+
+    Idempotent — returns existing active or completed session if one
+    exists. The student walks up to this whenever they want; it's
+    parallel to task 3, not blocking.
+    """
+    app_data = get_application(req.application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if app_data.get("current_stage") != "work_task":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Performance review is only available during the work "
+                "task stage."
+            ),
+        )
+
+    # Verify task 2 has been submitted (the trigger condition)
+    tasks = list_tasks_for_application(req.application_id, only_visible=False)
+    task2 = next((t for t in tasks if t.get("sequence") == 2), None)
+    if not task2 or task2.get("status") not in ("submitted", "passed",
+                                                 "failed", "reviewed"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The mid-placement check-in opens after you submit "
+                "your second task."
+            ),
+        )
+
+    existing = get_active_performance_review(req.application_id)
+    if existing:
+        return _perf_review_session_to_model(existing)
+
+    context = performance_review_mod.build_mid_placement_context(req.application_id)
+    system_prompt = performance_review_mod.build_performance_review_system_prompt(context)
+
+    job = get_job(app_data["company_slug"], app_data.get("job_slug", "")) or {}
+    mentor_name = job.get("reports_to", "Your mentor")
+    session_id = create_interview_session(
+        application_id=req.application_id,
+        manager_slug=mentor_name.lower().replace(" ", "-"),
+        manager_name=mentor_name,
+        kind="performance_review",
+    )
+
+    opening = await performance_review_mod.chat_completion_for_review(
+        system_prompt, [],
+    )
+    append_interview_message(session_id, "assistant", opening)
+
+    session = get_interview_session(session_id)
+    return _perf_review_session_to_model(session)
+
+
+@app.post("/api/v1/perf-review/message", response_model=InterviewMessageReply)
+async def perf_review_message(
+    req: InterviewMessageRequest,
+) -> InterviewMessageReply:
+    """Send a student turn to the mentor and get their reply."""
+    session = get_interview_session(req.session_id)
+    if not session or session.get("kind") != "performance_review":
+        raise HTTPException(
+            status_code=404, detail="Performance review session not found",
+        )
+    if session["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    append_interview_message(req.session_id, "user", req.message.strip())
+
+    context = performance_review_mod.build_mid_placement_context(
+        session["application_id"],
+    )
+    system_prompt = performance_review_mod.build_performance_review_system_prompt(context)
+
+    refreshed = get_interview_session(req.session_id) or session
+    transcript = refreshed.get("transcript", [])
+
+    reply = await performance_review_mod.chat_completion_for_review(
+        system_prompt, transcript,
+    )
+    append_interview_message(req.session_id, "assistant", reply)
+
+    refreshed = get_interview_session(req.session_id) or session
+    turn = sum(1 for m in refreshed.get("transcript", []) if m.get("role") == "user")
+    return InterviewMessageReply(
+        session_id=req.session_id,
+        reply=reply,
+        turn=turn,
+        target_turns=performance_review_mod.TARGET_TURNS,
+        suggested_wrap_up=turn >= performance_review_mod.WRAP_UP_AFTER,
+    )
+
+
+@app.post("/api/v1/perf-review/{session_id}/end", response_model=InterviewSession)
+async def perf_review_end(session_id: int) -> InterviewSession:
+    """End the coaching conversation, run the assessment, persist the notes.
+
+    No state transition — the student is still on placement and still
+    has task 3 to do. The coaching_notes get stored on the session row
+    and Stage 6 reads them later as part of the journey context.
+    """
+    session = get_interview_session(session_id)
+    if not session or session.get("kind") != "performance_review":
+        raise HTTPException(
+            status_code=404, detail="Performance review session not found",
+        )
+    if session["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    application_id = session["application_id"]
+    context = performance_review_mod.build_mid_placement_context(application_id)
+    transcript = session.get("transcript", [])
+
+    result = await performance_review_mod.assess_performance_review(
+        transcript=transcript, context=context,
+    )
+
+    feedback_dict = result.feedback.model_dump()
+    complete_interview_session(
+        session_id=session_id,
+        final_score=result.fit_score,
+        feedback={
+            "fit_score": result.fit_score,
+            "feedback": feedback_dict,
+            "summary": result.message,
+            "key_focus": feedback_dict.get("tailoring", ""),
+            "kind": "performance_review",
+        },
+    )
+
+    final = get_interview_session(session_id)
+    return _perf_review_session_to_model(final)
+
+
+@app.get(
+    "/api/v1/perf-review/application/{application_id}",
+    response_model=InterviewSession,
+)
+def get_perf_review_for_application(application_id: int) -> InterviewSession:
+    """Look up the active or most recent performance review for an application."""
+    session = get_active_performance_review(application_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="No performance review yet")
+    return _perf_review_session_to_model(session)
+
+
 # --- Stage 4: Work tasks --------------------------------------------------
 
 
@@ -2141,23 +2691,24 @@ async def submit_task(
         )
 
         # Final-task handoff: the student has finished all work tasks.
-        # Advance the application stage so Stage 6 (exit interview) can
-        # pick it up when it's built. We skip over 'lunchroom' for now —
-        # Stage 5 will wire that in later. Also emit an in-app "work
-        # phase complete" message so the student has a clear signal.
-        #
-        # TODO stage 6: trigger_exit_interview(application_id) once built.
+        # Advance to Stage 6 (exit interview) and drop a wrapup message
+        # in the work inbox pointing the student at the exit interview
+        # view in their portal. The exit interview view auto-creates the
+        # session on first visit (no booking flow at this stage — it's a
+        # walk-up reflective conversation, not a scheduled meeting).
         if is_final_task:
             advance_stage(application_id, "exit_interview")
             wrapup_body = (
                 f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
                 f"You've completed all of your work tasks at {company_name}. "
-                f"Before we wrap up your internship, we'll schedule a short "
-                f"exit conversation to reflect on what you learned and what "
-                f"you'd do differently. Someone will be in touch with the "
-                f"details shortly.\n\n"
                 f"Congratulations on getting through the program — take a "
                 f"moment to recognise that.\n\n"
+                f"To wrap up your placement we'd like you to sit down with "
+                f"Sam Reilly from People & Culture for a short reflective "
+                f"conversation — not an evaluation, just a chance to think "
+                f"back on what you learned and share any feedback for us.\n\n"
+                f"Your exit interview is now available in your WorkReady "
+                f"portal. It should take about 10 minutes.\n\n"
                 f"— {company_name}"
             )
             create_message(
@@ -2165,12 +2716,48 @@ async def submit_task(
                 student_email=student["email"],
                 sender_name=f"{company_name}",
                 sender_role="HR",
-                subject=f"Work phase complete — {company_name}",
+                subject=f"Wrap-up conversation ready — {company_name}",
                 body=wrapup_body,
                 inbox="work",
                 application_id=application_id,
                 related_stage="exit_interview",
                 deliver_at=review_deliver_at,
+            )
+
+    # Mid-placement performance review hook: fires once, on the second
+    # task submission. Drops a coaching invitation in the work inbox
+    # pointing the student at the perf-review view in their portal.
+    # Lazy-gated like the feedback message — they share a deliver_at.
+    if task.get("sequence") == 2 and student:
+        try:
+            perf_review_body = (
+                f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
+                f"You're a couple of tasks in now — nice work getting "
+                f"this far. Before you kick off the next brief, swing by "
+                f"my desk for a quick check-in. Won't take long; I just "
+                f"want to talk through what's working and what to focus "
+                f"on for task 3.\n\n"
+                f"You can find the chat in your WorkReady portal under "
+                f"'Mid-placement check-in'. Drop in whenever suits.\n\n"
+                f"— {mentor_name}"
+            )
+            create_message(
+                student_id=student["id"],
+                student_email=student["email"],
+                sender_name=mentor_name,
+                sender_role=f"Your mentor at {company_name}",
+                subject=f"Quick check-in before task 3",
+                body=perf_review_body,
+                inbox="work",
+                application_id=application_id,
+                related_stage="work_task",
+                deliver_at=review_deliver_at,
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "Performance review invitation failed for application %d",
+                application_id,
             )
 
     # Stage 5a: lunchroom invitation hook. When LUNCHROOM_TRIGGER is
@@ -2418,3 +3005,144 @@ def decline_lunchroom_invitation_route(session_id: int) -> LunchroomSession:
     # has been reached (fires at most once per application).
     lunchroom_mod.maybe_send_decline_check_in(session["application_id"])
     return _lunchroom_session_to_model(updated)
+
+
+# --- Stage 5b: Lunchroom chat ---------------------------------------------
+
+
+def _post_row_to_model(row: dict) -> LunchroomPost:
+    return LunchroomPost(
+        id=row["id"],
+        session_id=row["session_id"],
+        sequence=row["sequence"],
+        author_kind=row["author_kind"],
+        author_slug=row.get("author_slug"),
+        author_name=row.get("author_name"),
+        content=row.get("content"),
+        deliver_at=row["deliver_at"],
+        status=row["status"],
+        mentions=row.get("mentions", []) or [],
+    )
+
+
+def _chat_entry_allowed(session: dict) -> bool:
+    """Has the student's accepted slot opened for entry?
+
+    Returns True if now is within [scheduled_at - EARLY, scheduled_at + LATE].
+    """
+    scheduled_at = session.get("scheduled_at")
+    if not scheduled_at:
+        return False
+    try:
+        target = scheduling.from_iso(scheduled_at)
+    except Exception:  # noqa: BLE001
+        return False
+    now = scheduling.now_utc()
+    early = timedelta(minutes=scheduling.LUNCHROOM_EARLY_ENTRY_MINUTES)
+    late = timedelta(hours=scheduling.LUNCHROOM_LATE_ENTRY_HOURS)
+    return (target - early) <= now <= (target + late)
+
+
+@app.post(
+    "/api/v1/lunchroom/session/{session_id}/activate",
+    response_model=LunchroomChatState,
+)
+async def activate_lunchroom_chat(session_id: int) -> LunchroomChatState:
+    """Activate the lunchroom chat — plans the arc, transitions to 'active'.
+
+    Idempotent: re-calling on an already-active session is a no-op that
+    returns current state.
+    """
+    session = get_lunchroom_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session["status"] == "accepted":
+        if not _chat_entry_allowed(session):
+            raise HTTPException(
+                status_code=400,
+                detail="Lunchroom is not open yet — come back closer to the time",
+            )
+        activated = lunchroom_chat_mod.activate(session_id)
+        if not activated:
+            raise HTTPException(
+                status_code=500, detail="Failed to activate lunchroom chat",
+            )
+        session = activated
+    elif session["status"] not in ("active", "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot activate lunchroom in status '{session['status']}'",
+        )
+
+    # Immediately try to deliver the opening beat if due
+    await lunchroom_chat_mod.deliver_due(session_id)
+    return _build_chat_state(session_id)
+
+
+@app.get(
+    "/api/v1/lunchroom/session/{session_id}/chat",
+    response_model=LunchroomChatState,
+)
+async def poll_lunchroom_chat(session_id: int) -> LunchroomChatState:
+    """Poll endpoint: render any due beats, return current visible posts."""
+    session = get_lunchroom_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session["status"] not in ("active", "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Chat not available in status '{session['status']}'",
+        )
+    if session["status"] == "active":
+        await lunchroom_chat_mod.deliver_due(session_id)
+    return _build_chat_state(session_id)
+
+
+@app.post(
+    "/api/v1/lunchroom/session/{session_id}/post",
+    response_model=LunchroomChatState,
+)
+async def post_lunchroom_message(
+    session_id: int, req: LunchroomPostRequest,
+) -> LunchroomChatState:
+    """Student posts a message to the chat."""
+    session = get_lunchroom_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session["status"] != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot post in status '{session['status']}'",
+        )
+
+    # Resolve student name for display
+    app_data = get_application(session["application_id"]) or {}
+    student = get_student_by_id(app_data.get("student_id", 0)) if app_data else None
+    full_name = (student or {}).get("name") or "You"
+    student_name = full_name.split()[0] if full_name else "You"
+
+    result = lunchroom_chat_mod.post_student_message(
+        session_id, req.content, student_name=student_name,
+    )
+    if not result:
+        raise HTTPException(status_code=400, detail="Empty or rejected message")
+
+    # Any @mentions may have pulled beats forward — try to deliver immediately
+    await lunchroom_chat_mod.deliver_due(session_id)
+    return _build_chat_state(session_id)
+
+
+def _build_chat_state(session_id: int) -> LunchroomChatState:
+    session = get_lunchroom_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    posts = db_list_lunchroom_posts(session_id, only_delivered=True)
+    return LunchroomChatState(
+        session_id=session_id,
+        status=session["status"],
+        soft_cap=scheduling.LUNCHROOM_SOFT_CAP,
+        hard_cap=scheduling.LUNCHROOM_HARD_CAP,
+        delivered_count=len(posts),
+        posts=[_post_row_to_model(p) for p in posts],
+    )

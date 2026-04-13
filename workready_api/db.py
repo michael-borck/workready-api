@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS interview_sessions (
     application_id INTEGER NOT NULL REFERENCES applications(id),
     manager_slug TEXT NOT NULL,
     manager_name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'hiring',  -- hiring | exit
     transcript_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'active',
     final_score INTEGER,
@@ -194,6 +195,25 @@ CREATE TABLE IF NOT EXISTS lunchroom_sessions (
     completed_at TEXT
 );
 
+-- Stage 5b: Lunchroom chat posts -------------------------------------------
+
+CREATE TABLE IF NOT EXISTS lunchroom_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES lunchroom_sessions(id),
+    sequence INTEGER NOT NULL,        -- ordering within session (1-based)
+    author_kind TEXT NOT NULL,        -- 'student' | 'character' | 'system'
+    author_slug TEXT,                 -- character slug (NULL for student/system)
+    author_name TEXT,                 -- display name
+    intention TEXT,                   -- planned beat intention (NULL for student/rendered)
+    content TEXT,                     -- rendered post text (NULL until delivered)
+    deliver_at TEXT NOT NULL,         -- UTC ISO; filter WHERE deliver_at <= now()
+    status TEXT NOT NULL DEFAULT 'pending',
+        -- pending | delivered | skipped
+    mentions_json TEXT,               -- list of character slugs addressed in this post
+    created_at TEXT NOT NULL,
+    delivered_at TEXT
+);
+
 -- Stage 4c: Calendar events ------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS calendar_events (
@@ -247,6 +267,10 @@ CREATE INDEX IF NOT EXISTS idx_lunchroom_sessions_application
     ON lunchroom_sessions(application_id, status);
 CREATE INDEX IF NOT EXISTS idx_lunchroom_sessions_scheduled
     ON lunchroom_sessions(scheduled_at) WHERE scheduled_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_lunchroom_posts_session
+    ON lunchroom_posts(session_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_lunchroom_posts_deliver
+    ON lunchroom_posts(session_id, deliver_at) WHERE status = 'pending';
 """
 
 
@@ -411,6 +435,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "deleted_at" not in msg_cols:
         conn.execute(
             "ALTER TABLE messages ADD COLUMN deleted_at TEXT"
+        )
+
+    # --- Migration 7: interview_sessions.kind (Stage 6 exit interview) ---
+    isess_cols = _table_columns(conn, "interview_sessions")
+    if "kind" not in isess_cols:
+        conn.execute(
+            "ALTER TABLE interview_sessions ADD COLUMN kind TEXT NOT NULL "
+            "DEFAULT 'hiring'"
         )
 
 
@@ -809,17 +841,55 @@ def create_interview_session(
     application_id: int,
     manager_slug: str,
     manager_name: str,
+    kind: str = "hiring",
 ) -> int:
-    """Create a new interview session. Returns session ID."""
+    """Create a new interview session. Returns session ID.
+
+    kind is 'hiring' (Stage 3) or 'exit' (Stage 6).
+    """
     now = _now()
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO interview_sessions
-               (application_id, manager_slug, manager_name, created_at)
-               VALUES (?, ?, ?, ?)""",
-            (application_id, manager_slug, manager_name, now),
+               (application_id, manager_slug, manager_name, kind, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (application_id, manager_slug, manager_name, kind, now),
         )
         return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_active_exit_interview(application_id: int) -> dict[str, Any] | None:
+    """Return the active or most recent exit interview for an application."""
+    return _get_latest_session_of_kind(application_id, "exit")
+
+
+def get_active_performance_review(application_id: int) -> dict[str, Any] | None:
+    """Return the active or most recent performance review for an application."""
+    return _get_latest_session_of_kind(application_id, "performance_review")
+
+
+def _get_latest_session_of_kind(
+    application_id: int, kind: str,
+) -> dict[str, Any] | None:
+    """Shared lookup: most recent interview_session of a given kind."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM interview_sessions "
+            "WHERE application_id = ? AND kind = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (application_id, kind),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["transcript"] = json.loads(d.get("transcript_json") or "[]")
+    d.pop("transcript_json", None)
+    if d.get("feedback_json"):
+        d["feedback"] = json.loads(d["feedback_json"])
+    else:
+        d["feedback"] = None
+    d.pop("feedback_json", None)
+    return d
 
 
 def get_interview_session(session_id: int) -> dict[str, Any] | None:
@@ -1508,6 +1578,160 @@ def set_lunchroom_calendar_event(session_id: int, event_id: int) -> None:
             "UPDATE lunchroom_sessions SET calendar_event_id = ? WHERE id = ?",
             (event_id, session_id),
         )
+
+
+# --- Stage 5b: Lunchroom chat posts ---------------------------------------
+
+
+def mark_lunchroom_active(session_id: int) -> None:
+    """Transition an accepted session to 'active' — chat is now live."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE lunchroom_sessions SET status = 'active' WHERE id = ?",
+            (session_id,),
+        )
+
+
+def mark_lunchroom_completed(
+    session_id: int,
+    *,
+    participation_notes: str | None = None,
+    system_feedback: str | None = None,
+) -> None:
+    """Transition an active session to 'completed'. Stage 5c will populate notes."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE lunchroom_sessions SET status = 'completed', "
+            "participation_notes = COALESCE(?, participation_notes), "
+            "system_feedback = COALESCE(?, system_feedback), "
+            "completed_at = ? WHERE id = ?",
+            (participation_notes, system_feedback, _now(), session_id),
+        )
+
+
+def create_lunchroom_post(
+    session_id: int,
+    sequence: int,
+    author_kind: str,
+    deliver_at: str,
+    *,
+    author_slug: str | None = None,
+    author_name: str | None = None,
+    intention: str | None = None,
+    content: str | None = None,
+    status: str = "pending",
+    mentions: list[str] | None = None,
+) -> int:
+    """Create a lunchroom_posts row. 'pending' if content is None, else 'delivered'."""
+    now = _now()
+    delivered_at = now if status == "delivered" else None
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO lunchroom_posts
+               (session_id, sequence, author_kind, author_slug, author_name,
+                intention, content, deliver_at, status, mentions_json,
+                created_at, delivered_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, sequence, author_kind, author_slug, author_name,
+             intention, content, deliver_at, status,
+             json.dumps(mentions or []), now, delivered_at),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def _decode_post_row(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    try:
+        d["mentions"] = json.loads(d.get("mentions_json") or "[]")
+    except (ValueError, TypeError):
+        d["mentions"] = []
+    return d
+
+
+def list_lunchroom_posts(
+    session_id: int,
+    *,
+    only_delivered: bool = False,
+) -> list[dict[str, Any]]:
+    """List all posts for a session, ordered by sequence."""
+    with get_db() as conn:
+        if only_delivered:
+            rows = conn.execute(
+                "SELECT * FROM lunchroom_posts WHERE session_id = ? "
+                "AND status = 'delivered' "
+                "ORDER BY delivered_at ASC, sequence ASC",
+                (session_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM lunchroom_posts WHERE session_id = ? "
+                "ORDER BY sequence ASC",
+                (session_id,),
+            ).fetchall()
+    return [_decode_post_row(r) for r in rows]
+
+
+def list_due_pending_posts(session_id: int) -> list[dict[str, Any]]:
+    """Return pending posts whose deliver_at has passed, in sequence order."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM lunchroom_posts WHERE session_id = ? "
+            "AND status = 'pending' AND deliver_at <= ? "
+            "ORDER BY sequence ASC",
+            (session_id, _now()),
+        ).fetchall()
+    return [_decode_post_row(r) for r in rows]
+
+
+def next_pending_post_for_character(
+    session_id: int, author_slug: str,
+) -> dict[str, Any] | None:
+    """Return the earliest pending post for a given character, or None."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM lunchroom_posts WHERE session_id = ? "
+            "AND status = 'pending' AND author_kind = 'character' "
+            "AND author_slug = ? ORDER BY sequence ASC LIMIT 1",
+            (session_id, author_slug),
+        ).fetchone()
+    return _decode_post_row(row) if row else None
+
+
+def update_post_deliver_at(post_id: int, deliver_at: str) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE lunchroom_posts SET deliver_at = ? WHERE id = ?",
+            (deliver_at, post_id),
+        )
+
+
+def mark_post_delivered(post_id: int, content: str) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE lunchroom_posts SET status = 'delivered', content = ?, "
+            "delivered_at = ? WHERE id = ?",
+            (content, _now(), post_id),
+        )
+
+
+def count_delivered_posts(session_id: int) -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM lunchroom_posts "
+            "WHERE session_id = ? AND status = 'delivered'",
+            (session_id,),
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def next_post_sequence(session_id: int) -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) AS m FROM lunchroom_posts "
+            "WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    return int(row["m"]) + 1 if row else 1
 
 
 # --- Stage 4c: Calendar events --------------------------------------------

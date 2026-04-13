@@ -397,3 +397,38 @@ class LunchroomSlotPickRequest(BaseModel):
     """Request body for picking a proposed slot."""
 
     scheduled_at: str  # must match one of the proposed slot ISO strings
+
+
+# --- Stage 5b: lunchroom chat ---
+
+
+class LunchroomPost(BaseModel):
+    """A single delivered post in the lunchroom group chat."""
+
+    id: int
+    session_id: int
+    sequence: int
+    author_kind: str  # student | character | system
+    author_slug: str | None = None
+    author_name: str | None = None
+    content: str | None = None
+    deliver_at: str
+    status: str  # pending | delivered
+    mentions: list[str] = []
+
+
+class LunchroomChatState(BaseModel):
+    """Portal poll response — session status plus all visible posts."""
+
+    session_id: int
+    status: str  # accepted | active | completed
+    soft_cap: int
+    hard_cap: int
+    delivered_count: int
+    posts: list[LunchroomPost] = []
+
+
+class LunchroomPostRequest(BaseModel):
+    """Request body for a student posting to the chat."""
+
+    content: str

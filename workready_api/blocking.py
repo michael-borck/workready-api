@@ -75,6 +75,25 @@ def get_blocked_for_student(student_id: int) -> dict:
             (student_id,),
         ).fetchall()
 
+        # Resigned applications also block the company — you can't quit
+        # IronVale on Tuesday and apply back on Wednesday. Same realism
+        # the rejection blocking provides. A resign always blocks at
+        # company level (the whole org remembers you).
+        resigned_rows = conn.execute(
+            """SELECT company_slug, job_slug FROM applications
+               WHERE student_id = ? AND status = 'resigned'""",
+            (student_id,),
+        ).fetchall()
+
+        # Completed applications also block re-application to the same
+        # company — once you've finished a placement there, you don't
+        # restart from scratch (cycle goes to a new company instead).
+        completed_rows = conn.execute(
+            """SELECT company_slug, job_slug FROM applications
+               WHERE student_id = ? AND status = 'completed'""",
+            (student_id,),
+        ).fetchall()
+
     for row in rows:
         level = get_blocking_level_for_stage(row["stage"])
         if level == "company":
@@ -82,6 +101,11 @@ def get_blocked_for_student(student_id: int) -> dict:
         elif level == "role":
             blocked_jobs.add((row["company_slug"], row["job_slug"]))
         # level == "none" → no blocking
+
+    for row in resigned_rows:
+        blocked_companies.add(row["company_slug"])
+    for row in completed_rows:
+        blocked_companies.add(row["company_slug"])
 
     # If a company is blocked, all roles within it are implicitly blocked.
     # We don't enumerate them here — the consumer checks company first.

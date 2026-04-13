@@ -74,6 +74,10 @@ SLOTS_OFFERED: int = _env_int("SLOTS_OFFERED", 4)
 LATE_GRACE_MINUTES: int = _env_int("LATE_GRACE_MINUTES", 5)
 MAX_MISSED_INTERVIEWS: int = _env_int("MAX_MISSED_INTERVIEWS", 3)
 MAX_RESCHEDULES: int = _env_int("MAX_RESCHEDULES", 1)
+# Lifecycle: maximum re-application cycles per student. Cycle 1 is the
+# first attempt; resigning or being rejected lets the student try a
+# different company on cycle 2, and so on, up to MAX_CYCLES.
+MAX_CYCLES: int = _env_int("MAX_CYCLES", 3)
 RESCHEDULE_LIMIT_MODE: str = os.environ.get("RESCHEDULE_LIMIT_MODE", "hard").lower()
 if RESCHEDULE_LIMIT_MODE not in ("hard", "soft"):
     RESCHEDULE_LIMIT_MODE = "hard"
@@ -113,6 +117,20 @@ LUNCHROOM_LATE_ENTRY_HOURS: int = _env_int("LUNCHROOM_LATE_ENTRY_HOURS", 24)
 # Soft and hard caps on total messages in the lunchroom chat (used in Stage 5b)
 LUNCHROOM_SOFT_CAP: int = _env_int("LUNCHROOM_SOFT_CAP", 18)
 LUNCHROOM_HARD_CAP: int = _env_int("LUNCHROOM_HARD_CAP", 25)
+# Beat pacing: seconds between consecutive planned character posts, plus jitter.
+# Tight default so the chat feels live in demos; lecturers can dial it back.
+LUNCHROOM_BEAT_INTERVAL_SECONDS: int = _env_int("LUNCHROOM_BEAT_INTERVAL_SECONDS", 25)
+LUNCHROOM_BEAT_JITTER_SECONDS: int = _env_int("LUNCHROOM_BEAT_JITTER_SECONDS", 10)
+# Opening post lands this many seconds after activation.
+LUNCHROOM_OPENING_DELAY_SECONDS: int = _env_int("LUNCHROOM_OPENING_DELAY_SECONDS", 5)
+# When the student @mentions a character, pull their next pending beat to
+# this many seconds from now (floor).
+LUNCHROOM_MENTION_RESCHEDULE_SECONDS: int = _env_int(
+    "LUNCHROOM_MENTION_RESCHEDULE_SECONDS", 8,
+)
+# Beats per character in the arc plan (inclusive range)
+LUNCHROOM_BEATS_PER_CHAR_MIN: int = _env_int("LUNCHROOM_BEATS_PER_CHAR_MIN", 3)
+LUNCHROOM_BEATS_PER_CHAR_MAX: int = _env_int("LUNCHROOM_BEATS_PER_CHAR_MAX", 5)
 # Comma-separated allow-list of occasion types. Empty = use the full default
 # weighted list. Lecturers can narrow this to pin a demo vibe.
 LUNCHROOM_OCCASIONS: str = os.environ.get("LUNCHROOM_OCCASIONS", "")
