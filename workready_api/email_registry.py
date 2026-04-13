@@ -93,27 +93,19 @@ def build_registry() -> dict[str, RegisteredAddress]:
         handler="noreply",
     )
 
-    # 2. Character emails — derived from brief.yaml employees via jobs.json
-    #    The employee data is baked into the job cache as reports_to / manager info,
-    #    but we need the full employee list. We'll parse it from the company cache
-    #    or from the brief data that load_jobs stores.
-    #
-    #    Since the current jobs.py only caches jobs and company-level meta (not
-    #    employees), we build character emails from what we know:
-    #    - Every reports_to field in jobs.json names a person
-    #    - We also check the manager_persona field for the slug
-    #
-    #    For a richer registry, we'd load brief.yaml directly. For now, this
-    #    gets us the key characters (the ones students would actually email).
+    # 2. Character emails from two sources:
+    #    a) reports_to fields in jobs.json (managers of listed roles)
+    #    b) brief.yaml employee lists (catches CEOs, safety managers, etc.
+    #       who aren't a direct reports_to for any listed job)
 
     seen_characters: set[str] = set()
 
+    # 2a. From jobs.json reports_to
     for (company_slug, job_slug), job in _JOB_CACHE.items():
         domain = COMPANY_DOMAINS.get(company_slug)
         if not domain:
             continue
 
-        # The reports_to field names a person (e.g. "Pete Drummond")
         reports_to = job.get("reports_to", "")
         if reports_to and reports_to not in seen_characters:
             seen_characters.add(reports_to)
@@ -129,6 +121,9 @@ def build_registry() -> dict[str, RegisteredAddress]:
                 character_role=job.get("manager_role", ""),
             )
 
+    # 2b. From brief.yaml employee lists
+    _register_from_briefs(seen_characters)
+
     # 3. Generic addresses for every company
     for company_slug, domain in COMPANY_DOMAINS.items():
         for prefix, handler in GENERIC_PREFIXES.items():
@@ -142,6 +137,50 @@ def build_registry() -> dict[str, RegisteredAddress]:
                 )
 
     return _REGISTRY
+
+
+def _register_from_briefs(seen: set[str]) -> None:
+    """Scan brief.yaml files to find employees not in the reports_to set."""
+    import os
+    from pathlib import Path
+
+    try:
+        import yaml
+    except ImportError:
+        return
+
+    sites_dir = Path(os.environ.get(
+        "SITES_DIR",
+        str(Path(__file__).parent.parent.parent),
+    ))
+
+    for company_slug, domain in COMPANY_DOMAINS.items():
+        brief_path = sites_dir / company_slug / "brief.yaml"
+        if not brief_path.is_file():
+            continue
+
+        try:
+            brief = yaml.safe_load(brief_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        for emp in brief.get("employees", []):
+            name = emp.get("name", "")
+            if not name or name in seen:
+                continue
+
+            seen.add(name)
+            local = _slug_to_email_local(name)
+            email = f"{local}@{domain}"
+            slug = emp.get("id", local.replace(".", "-"))
+            _REGISTRY[email] = RegisteredAddress(
+                email=email,
+                kind="character",
+                company_slug=company_slug,
+                character_slug=slug,
+                character_name=name,
+                character_role=emp.get("role", ""),
+            )
 
 
 def get_registry() -> dict[str, RegisteredAddress]:
