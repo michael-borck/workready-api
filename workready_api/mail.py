@@ -506,12 +506,59 @@ def _build_email_system_prompt(persona: str, student_message: str) -> str:
     return (
         f"{persona}\n\n"
         f"--- EMAIL REPLY INSTRUCTIONS ---\n"
-        f"You are replying to an email from a student/applicant. Write a "
-        f"natural, professional email response. Keep it concise (2-4 short "
-        f"paragraphs max). Sign off with your first name.\n\n"
+        f"You are replying to an email conversation with a student/applicant. "
+        f"You may see previous messages in the thread — use them for context "
+        f"and continuity. Do not repeat information you've already given.\n\n"
+        f"Write a natural, professional email response. Keep it concise (2-4 "
+        f"short paragraphs max). Sign off with your first name.\n\n"
         f"Do NOT use subject lines or email headers — just write the body "
         f"of the reply. Do NOT mention that you are an AI or a simulation."
     )
+
+
+# Maximum number of thread messages to include in context. Keeps the
+# context window manageable for very long threads (unlikely in practice —
+# most email threads are 3-6 messages).
+MAX_THREAD_MESSAGES = 20
+
+
+def _build_thread_messages(
+    thread_id: int | None,
+    student_id: int,
+    current_message: str,
+) -> list[dict[str, str]]:
+    """Build a messages array from the conversation thread.
+
+    Loads the full thread from the DB and maps:
+      - Student outbound messages → role: user
+      - Character inbound replies → role: assistant
+
+    The current (just-sent) student message is appended at the end since
+    it won't have been stored in the thread yet at this point.
+
+    If there's no thread history, returns just the current message.
+    """
+    messages: list[dict[str, str]] = []
+
+    if thread_id:
+        thread = get_thread(thread_id, student_id)
+        for msg in thread[-MAX_THREAD_MESSAGES:]:
+            direction = msg.get("direction", "inbound")
+            if direction == "outbound":
+                # Student's sent message
+                messages.append({"role": "user", "content": msg.get("body", "")})
+            else:
+                # Character's reply (or system message — skip those)
+                sender_email = msg.get("sender_email", "")
+                if "noreply" not in sender_email:
+                    messages.append({"role": "assistant", "content": msg.get("body", "")})
+
+    # If the current message isn't already in the thread (it was just sent
+    # and may not have been committed yet), append it
+    if not messages or messages[-1].get("content") != current_message:
+        messages.append({"role": "user", "content": current_message})
+
+    return messages
 
 
 async def _handle_character_reply(
@@ -521,7 +568,13 @@ async def _handle_character_reply(
     student_message: str,
     thread_id: int | None = None,
 ):
-    """Generate an LLM reply as the character and deliver via notify().
+    """Generate a thread-aware LLM reply as the character via notify().
+
+    Loads the full conversation thread from the DB and passes it as a
+    messages array so the character "remembers" previous exchanges.
+    Context-stuffed — no RAG, no external dependency. A typical email
+    thread of 5 exchanges + the 3700-char persona is ~6000 tokens,
+    well within any model's context window.
 
     Runs as a background task so the compose endpoint returns immediately.
     Falls back to a simple ack if the LLM call fails.
@@ -536,7 +589,13 @@ async def _handle_character_reply(
             resolved.company_slug or "", name
         )
         system_prompt = _build_email_system_prompt(persona, student_message)
-        messages = [{"role": "user", "content": student_message}]
+
+        # Build the full conversation from the thread history.
+        # Student outbound messages → role: user
+        # Character inbound replies → role: assistant
+        messages = _build_thread_messages(
+            thread_id, student["id"], student_message
+        )
 
         reply_body = await chat_completion(system_prompt, messages)
 
