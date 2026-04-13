@@ -928,20 +928,18 @@ def create_bounce_message(
     student_email: str,
     original_recipient: str,
     original_subject: str,
-    suggestion: str | None = None,
 ) -> int:
-    """Create a bounce notification in the student's inbox."""
+    """Create a bounce notification in the student's inbox.
+
+    No "did you mean?" suggestions — real email doesn't offer those.
+    The student learns to check addresses carefully.
+    """
     body = (
         f"Delivery failed\n\n"
         f"Your message to {original_recipient} could not be delivered. "
-        f"The address was not found in any company's directory.\n\n"
-        f"Original subject: {original_subject}\n"
-    )
-    if suggestion:
-        body += f"\nDid you mean: {suggestion}?\n"
-    body += (
-        "\nTip: Check the company website for correct contact details, "
-        "or browse the staff directory if you have access."
+        f"The address was not found.\n\n"
+        f"Original subject: {original_subject}\n\n"
+        f"Check the company website for correct contact details."
     )
 
     return create_message(

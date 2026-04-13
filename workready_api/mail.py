@@ -36,7 +36,6 @@ from workready_api.db import (
 )
 from workready_api.email_registry import (
     SYSTEM_NOREPLY,
-    find_closest_match,
     resolve_address,
 )
 from workready_api.notifications import NotifyContent, notify
@@ -92,7 +91,6 @@ class SendResult(BaseModel):
     message_id: int
     status: str  # delivered | bounced
     bounce_reason: str | None = None
-    suggestion: str | None = None
 
 
 class AttachmentInfo(BaseModel):
@@ -154,10 +152,7 @@ async def compose_message(
     resolved = resolve_address(recipient_email)
 
     if resolved is None:
-        # Invalid address → bounce
-        suggestion = find_closest_match(recipient_email)
-
-        # Still record the outbound message in the sent box (as bounced)
+        # Invalid address → bounce (no suggestions — real email doesn't offer them)
         msg_id = create_outbound_message(
             student_id=student["id"],
             student_email=student_email,
@@ -176,20 +171,17 @@ async def compose_message(
                 file_size=attachment_size,
             )
 
-        # Create bounce notification in inbox
         create_bounce_message(
             student_id=student["id"],
             student_email=student_email,
             original_recipient=recipient_email,
             original_subject=subject,
-            suggestion=suggestion,
         )
 
         return SendResult(
             message_id=msg_id,
             status="bounced",
             bounce_reason=f"Address not found: {recipient_email}",
-            suggestion=suggestion,
         )
 
     if resolved.kind == "system":
