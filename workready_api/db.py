@@ -171,6 +171,29 @@ CREATE TABLE IF NOT EXISTS task_submissions (
     created_at TEXT NOT NULL
 );
 
+-- Stage 5: Lunchroom sessions ----------------------------------------------
+
+CREATE TABLE IF NOT EXISTS lunchroom_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    application_id INTEGER NOT NULL REFERENCES applications(id),
+    occasion TEXT NOT NULL,           -- routine_lunch | task_celebration | birthday | staff_award | project_launch | cultural_event
+    occasion_detail TEXT,             -- e.g. "Sarah's birthday" or "Marcus regional award"
+    participants_json TEXT NOT NULL,  -- list of participant dicts (slug, name, role)
+    proposed_slots_json TEXT NOT NULL,-- list of ISO slot strings offered to student
+    scheduled_at TEXT,                -- picked slot (NULL until accepted)
+    status TEXT NOT NULL DEFAULT 'invited',
+        -- invited | accepted | active | completed | declined | missed | cancelled
+    transcript_json TEXT NOT NULL DEFAULT '[]',
+    participation_notes TEXT,
+    system_feedback TEXT,
+    trigger_source TEXT,              -- task_review | time_based | manual — why this invite fired
+    trigger_task_id INTEGER,          -- task id that triggered (for task_review mode)
+    invitation_message_id INTEGER,    -- the work-inbox message introducing this invite
+    calendar_event_id INTEGER,        -- the calendar row, set once accepted
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
 -- Stage 4c: Calendar events ------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS calendar_events (
@@ -220,6 +243,10 @@ CREATE INDEX IF NOT EXISTS idx_calendar_events_application
     ON calendar_events(application_id, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_calendar_events_related
     ON calendar_events(related_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_lunchroom_sessions_application
+    ON lunchroom_sessions(application_id, status);
+CREATE INDEX IF NOT EXISTS idx_lunchroom_sessions_scheduled
+    ON lunchroom_sessions(scheduled_at) WHERE scheduled_at IS NOT NULL;
 """
 
 
@@ -1339,6 +1366,148 @@ def list_prior_task_history(
         task["submission"] = get_latest_submission(task["id"])
         history.append(task)
     return history
+
+
+# --- Stage 5: Lunchroom sessions ------------------------------------------
+
+
+def create_lunchroom_invitation(
+    application_id: int,
+    occasion: str,
+    participants: list[dict[str, Any]],
+    proposed_slots: list[str],
+    trigger_source: str,
+    occasion_detail: str | None = None,
+    trigger_task_id: int | None = None,
+    invitation_message_id: int | None = None,
+) -> int:
+    """Create a lunchroom session in 'invited' state (no slot picked yet).
+
+    participants is a list of dicts with keys: slug, name, role.
+    proposed_slots is a list of UTC ISO strings the student can pick from.
+    """
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO lunchroom_sessions
+               (application_id, occasion, occasion_detail, participants_json,
+                proposed_slots_json, scheduled_at, status, trigger_source,
+                trigger_task_id, invitation_message_id, created_at)
+               VALUES (?, ?, ?, ?, ?, NULL, 'invited', ?, ?, ?, ?)""",
+            (application_id, occasion, occasion_detail,
+             json.dumps(participants), json.dumps(proposed_slots),
+             trigger_source, trigger_task_id, invitation_message_id, now),
+        )
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def _decode_lunchroom_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Turn a lunchroom_sessions row into a dict with JSON fields decoded."""
+    d = dict(row)
+    for key in ("participants_json", "proposed_slots_json", "transcript_json"):
+        if d.get(key):
+            try:
+                d[key.replace("_json", "")] = json.loads(d[key])
+            except (ValueError, TypeError):
+                d[key.replace("_json", "")] = []
+        else:
+            d[key.replace("_json", "")] = []
+    return d
+
+
+def get_lunchroom_session(session_id: int) -> dict[str, Any] | None:
+    """Look up a lunchroom session by ID."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM lunchroom_sessions WHERE id = ?", (session_id,),
+        ).fetchone()
+    return _decode_lunchroom_row(row) if row else None
+
+
+def list_lunchroom_sessions_for_application(
+    application_id: int,
+    *,
+    statuses: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """List lunchroom sessions for an application.
+
+    statuses filters to specific status values (e.g. ["invited", "accepted"]).
+    Returns newest first.
+    """
+    with get_db() as conn:
+        if statuses:
+            placeholders = ",".join("?" * len(statuses))
+            rows = conn.execute(
+                f"SELECT * FROM lunchroom_sessions WHERE application_id = ? "
+                f"AND status IN ({placeholders}) ORDER BY created_at DESC",
+                (application_id, *statuses),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM lunchroom_sessions WHERE application_id = ? "
+                "ORDER BY created_at DESC",
+                (application_id,),
+            ).fetchall()
+    return [_decode_lunchroom_row(r) for r in rows]
+
+
+def count_lunchroom_outcomes(
+    application_id: int, statuses: list[str],
+) -> int:
+    """Count lunchroom sessions for an app whose status is in the given list.
+
+    Used for: total invites created (to cap at LUNCHROOM_INVITES), declines +
+    misses (to trigger mentor check-in at LUNCHROOM_DECLINE_LIMIT).
+    """
+    if not statuses:
+        return 0
+    with get_db() as conn:
+        placeholders = ",".join("?" * len(statuses))
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM lunchroom_sessions "
+            f"WHERE application_id = ? AND status IN ({placeholders})",
+            (application_id, *statuses),
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def pick_lunchroom_slot(
+    session_id: int, scheduled_at: str, calendar_event_id: int | None = None,
+) -> None:
+    """Transition an invitation to 'accepted' with the picked slot."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE lunchroom_sessions SET status = 'accepted', "
+            "scheduled_at = ?, calendar_event_id = ? WHERE id = ?",
+            (scheduled_at, calendar_event_id, session_id),
+        )
+
+
+def decline_lunchroom_invitation(session_id: int) -> None:
+    """Mark an invitation as declined."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE lunchroom_sessions SET status = 'declined' WHERE id = ?",
+            (session_id,),
+        )
+
+
+def mark_lunchroom_missed(session_id: int) -> None:
+    """Mark an accepted session as missed (entry window elapsed)."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE lunchroom_sessions SET status = 'missed' WHERE id = ?",
+            (session_id,),
+        )
+
+
+def set_lunchroom_calendar_event(session_id: int, event_id: int) -> None:
+    """Attach the materialised calendar_events row to a lunchroom session."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE lunchroom_sessions SET calendar_event_id = ? WHERE id = ?",
+            (event_id, session_id),
+        )
 
 
 # --- Stage 4c: Calendar events --------------------------------------------

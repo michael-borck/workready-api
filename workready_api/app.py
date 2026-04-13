@@ -32,6 +32,7 @@ from workready_api.db import (
     get_inbox,
     get_interview_session,
     get_latest_submission,
+    get_lunchroom_session,
     get_or_create_student,
     get_posting,
     get_stage_results,
@@ -42,6 +43,7 @@ from workready_api.db import (
     increment_reschedule_count,
     init_db,
     list_calendar_events,
+    list_lunchroom_sessions_for_application,
     list_prior_task_history,
     list_tasks_for_application,
     mark_message_read,
@@ -52,6 +54,7 @@ from workready_api.db import (
     update_booking_status,
     update_calendar_event_status,
 )
+from workready_api import lunchroom as lunchroom_mod
 from workready_api.interview import (
     TARGET_TURNS,
     WRAP_UP_AFTER,
@@ -98,6 +101,11 @@ from workready_api.models import (
     StudentState,
     CalendarEvent,
     CalendarEventList,
+    LunchroomParticipant,
+    LunchroomSession,
+    LunchroomSessionList,
+    LunchroomSlot,
+    LunchroomSlotPickRequest,
     TaskDetail,
     TaskFeedback,
     TaskList,
@@ -2165,6 +2173,31 @@ async def submit_task(
                 deliver_at=review_deliver_at,
             )
 
+    # Stage 5a: lunchroom invitation hook. When LUNCHROOM_TRIGGER is
+    # 'task_review' (default), each task submission may create a new
+    # lunchroom invitation — up to LUNCHROOM_INVITES total per
+    # application. The invitation appears as a work-inbox message
+    # shortly after the feedback email, offering 3 lunchtime slots.
+    # create_invitation is idempotent-ish (respects the cap itself)
+    # and returns None if the cap is hit or no participants/slots
+    # can be picked.
+    if scheduling.LUNCHROOM_TRIGGER == "task_review":
+        try:
+            lunchroom_mod.create_invitation(
+                application=app_data,
+                trigger_source="task_review",
+                trigger_task=task,
+            )
+        except Exception:  # noqa: BLE001
+            # A lunchroom failure shouldn't break the submit flow —
+            # the student's task submission and feedback are the
+            # critical path. Log and continue.
+            import logging
+            logging.getLogger(__name__).exception(
+                "Lunchroom invitation creation failed for application %d "
+                "on task %d", application_id, task_id,
+            )
+
     # The response is deliberately lazy-gated too: until the feedback
     # delay elapses, we report 'under_review' and no score/feedback.
     review_ready = review_deliver_at <= scheduling.to_iso(scheduling.now_utc())
@@ -2264,3 +2297,124 @@ def decline_calendar_event(event_id: int) -> CalendarEvent:
         )
     update_calendar_event_status(event_id, "declined")
     return _event_to_model(get_calendar_event(event_id) or event)
+
+
+# --- Stage 5: Lunchroom ---------------------------------------------------
+
+
+def _lunchroom_session_to_model(row: dict) -> LunchroomSession:
+    """Convert a decoded lunchroom_sessions dict to a Pydantic model."""
+    participants = [
+        LunchroomParticipant(
+            slug=p.get("slug", ""),
+            name=p.get("name", ""),
+            role=p.get("role", "") or "",
+        )
+        for p in (row.get("participants") or [])
+    ]
+    slots = [
+        LunchroomSlot(
+            scheduled_at=s,
+            local_display=lunchroom_mod._format_slot_human(s),
+        )
+        for s in (row.get("proposed_slots") or [])
+    ]
+    return LunchroomSession(
+        id=row["id"],
+        application_id=row["application_id"],
+        occasion=row["occasion"],
+        occasion_detail=row.get("occasion_detail"),
+        participants=participants,
+        proposed_slots=slots,
+        scheduled_at=row.get("scheduled_at"),
+        status=row["status"],
+        trigger_source=row.get("trigger_source"),
+        invitation_message_id=row.get("invitation_message_id"),
+        calendar_event_id=row.get("calendar_event_id"),
+        created_at=row["created_at"],
+        completed_at=row.get("completed_at"),
+    )
+
+
+@app.get(
+    "/api/v1/lunchroom/application/{application_id}",
+    response_model=LunchroomSessionList,
+)
+def list_lunchroom_sessions(application_id: int) -> LunchroomSessionList:
+    """List all lunchroom sessions (invites + accepted + completed) for an app."""
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    rows = list_lunchroom_sessions_for_application(application_id)
+    return LunchroomSessionList(
+        application_id=application_id,
+        sessions=[_lunchroom_session_to_model(r) for r in rows],
+        total=len(rows),
+    )
+
+
+@app.get(
+    "/api/v1/lunchroom/session/{session_id}",
+    response_model=LunchroomSession,
+)
+def get_lunchroom(session_id: int) -> LunchroomSession:
+    """Get a single lunchroom session by ID."""
+    session = get_lunchroom_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _lunchroom_session_to_model(session)
+
+
+@app.post(
+    "/api/v1/lunchroom/invitation/{session_id}/pick-slot",
+    response_model=LunchroomSession,
+)
+def pick_lunchroom_slot_route(
+    session_id: int, req: LunchroomSlotPickRequest,
+) -> LunchroomSession:
+    """Student picks one of the proposed slots.
+
+    Validates the picked ISO matches one of the proposed slots, transitions
+    the session to 'accepted', and materialises a calendar event so it
+    shows up in the calendar view.
+    """
+    session = get_lunchroom_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session["status"] != "invited":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session cannot be picked in status '{session['status']}'",
+        )
+    if req.scheduled_at not in (session.get("proposed_slots") or []):
+        raise HTTPException(
+            status_code=400,
+            detail="Picked slot is not one of the proposed options",
+        )
+    updated = lunchroom_mod.accept_slot(session_id, req.scheduled_at)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to accept slot")
+    return _lunchroom_session_to_model(updated)
+
+
+@app.post(
+    "/api/v1/lunchroom/invitation/{session_id}/decline",
+    response_model=LunchroomSession,
+)
+def decline_lunchroom_invitation_route(session_id: int) -> LunchroomSession:
+    """Student declines the invitation. May trigger a mentor check-in."""
+    session = get_lunchroom_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session["status"] != "invited":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session cannot be declined in status '{session['status']}'",
+        )
+    updated = lunchroom_mod.decline(session_id)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to decline invitation")
+    # Possibly trigger the gentle mentor check-in if the decline threshold
+    # has been reached (fires at most once per application).
+    lunchroom_mod.maybe_send_decline_check_in(session["application_id"])
+    return _lunchroom_session_to_model(updated)

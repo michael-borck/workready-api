@@ -94,6 +94,29 @@ INTERVIEW_FEEDBACK_DELAY_JITTER_MINUTES: int = _env_int(
     "INTERVIEW_FEEDBACK_DELAY_JITTER_MINUTES", 0
 )
 
+# Stage 5: Lunchroom
+LUNCHROOM_INVITES: int = _env_int("LUNCHROOM_INVITES", 3)
+LUNCHROOM_DECLINE_LIMIT: int = _env_int("LUNCHROOM_DECLINE_LIMIT", 2)
+LUNCHROOM_TRIGGER: str = os.environ.get("LUNCHROOM_TRIGGER", "task_review").lower()
+LUNCHROOM_INCLUDE_MENTOR: bool = _env_bool("LUNCHROOM_INCLUDE_MENTOR", False)
+LUNCHROOM_PARTICIPANT_COUNT: int = _env_int("LUNCHROOM_PARTICIPANT_COUNT", 3)
+# Slot windowing for the invitation: start no sooner than LEAD hours from now,
+# look up to HORIZON days ahead, narrow to a noon–2pm window in local time.
+LUNCHROOM_INVITE_LEAD_HOURS: int = _env_int("LUNCHROOM_INVITE_LEAD_HOURS", 24)
+LUNCHROOM_INVITE_HORIZON_DAYS: int = _env_int("LUNCHROOM_INVITE_HORIZON_DAYS", 5)
+LUNCHROOM_TIME_OF_DAY_START: int = _env_int("LUNCHROOM_TIME_OF_DAY_START", 12)
+LUNCHROOM_TIME_OF_DAY_END: int = _env_int("LUNCHROOM_TIME_OF_DAY_END", 14)
+LUNCHROOM_SLOTS_OFFERED: int = _env_int("LUNCHROOM_SLOTS_OFFERED", 3)
+# Entry window once a slot is picked
+LUNCHROOM_EARLY_ENTRY_MINUTES: int = _env_int("LUNCHROOM_EARLY_ENTRY_MINUTES", 5)
+LUNCHROOM_LATE_ENTRY_HOURS: int = _env_int("LUNCHROOM_LATE_ENTRY_HOURS", 24)
+# Soft and hard caps on total messages in the lunchroom chat (used in Stage 5b)
+LUNCHROOM_SOFT_CAP: int = _env_int("LUNCHROOM_SOFT_CAP", 18)
+LUNCHROOM_HARD_CAP: int = _env_int("LUNCHROOM_HARD_CAP", 25)
+# Comma-separated allow-list of occasion types. Empty = use the full default
+# weighted list. Lecturers can narrow this to pin a demo vibe.
+LUNCHROOM_OCCASIONS: str = os.environ.get("LUNCHROOM_OCCASIONS", "")
+
 # Stage 4: Work tasks
 TASKS_PER_STUDENT: int = _env_int("TASKS_PER_STUDENT", 3)
 TASK_DEADLINE_DAYS: int = _env_int("TASK_DEADLINE_DAYS", 7)

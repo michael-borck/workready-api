@@ -342,3 +342,58 @@ class CalendarEventList(BaseModel):
     application_id: int
     events: list[CalendarEvent]
     total: int
+
+
+# --- Stage 5: Lunchroom ---
+
+
+class LunchroomParticipant(BaseModel):
+    """One AI character attending a lunchroom session."""
+
+    slug: str
+    name: str
+    role: str = ""
+
+
+class LunchroomSlot(BaseModel):
+    """A proposed lunchtime slot the student can pick."""
+
+    scheduled_at: str  # UTC ISO
+    local_display: str  # human-readable in local timezone
+
+
+class LunchroomSession(BaseModel):
+    """A lunchroom session — invitation, accepted, or completed.
+
+    Covers the full lifecycle: when status='invited' there's no
+    scheduled_at yet and the proposed_slots carry the options; once
+    accepted, scheduled_at is set and proposed_slots is empty.
+    """
+
+    id: int
+    application_id: int
+    occasion: str  # routine_lunch | task_celebration | birthday | ...
+    occasion_detail: str | None = None
+    participants: list[LunchroomParticipant] = []
+    proposed_slots: list[LunchroomSlot] = []
+    scheduled_at: str | None = None
+    status: str  # invited | accepted | active | completed | declined | missed | cancelled
+    trigger_source: str | None = None
+    invitation_message_id: int | None = None
+    calendar_event_id: int | None = None
+    created_at: str
+    completed_at: str | None = None
+
+
+class LunchroomSessionList(BaseModel):
+    """All lunchroom sessions for an application, newest first."""
+
+    application_id: int
+    sessions: list[LunchroomSession]
+    total: int
+
+
+class LunchroomSlotPickRequest(BaseModel):
+    """Request body for picking a proposed slot."""
+
+    scheduled_at: str  # must match one of the proposed slot ISO strings
