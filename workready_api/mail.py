@@ -516,10 +516,54 @@ def _build_email_system_prompt(persona: str, student_message: str) -> str:
     )
 
 
-# Maximum number of thread messages to include in context. Keeps the
-# context window manageable for very long threads (unlikely in practice —
-# most email threads are 3-6 messages).
+# Context budget for email threads. The persona is ~3700 chars (~925 tokens).
+# We reserve 2000 tokens for the reply. The rest is thread history.
+# Rough token estimate: len(text) / 4.
 MAX_THREAD_MESSAGES = 20
+CONTEXT_BUDGET_CHARS = 24000   # ~6000 tokens — safe for any model ≥8K context
+RECENT_KEEP = 4                # always keep the last N messages verbatim
+
+# Summary prompt used when the thread exceeds the context budget
+_SUMMARY_PROMPT = (
+    "Summarise the email conversation below in 3-5 bullet points. "
+    "Focus on: key facts exchanged, questions asked and answered, "
+    "commitments made, and anything the student still wants to know. "
+    "Be concise — this summary will be used as context for the next reply."
+)
+
+
+def _estimate_chars(messages: list[dict[str, str]]) -> int:
+    """Total character count across all messages."""
+    return sum(len(m.get("content", "")) for m in messages)
+
+
+async def _summarise_thread(
+    older_messages: list[dict[str, str]],
+    system_prompt: str,
+) -> str:
+    """Ask the LLM to summarise the older part of a long thread."""
+    from workready_api.interview import chat_completion
+
+    transcript = ""
+    for m in older_messages:
+        role_label = "Student" if m["role"] == "user" else "Character"
+        transcript += f"\n{role_label}:\n{m['content']}\n"
+
+    try:
+        summary = await chat_completion(
+            _SUMMARY_PROMPT,
+            [{"role": "user", "content": transcript}],
+        )
+        return summary
+    except Exception as exc:
+        log.warning("Thread summarisation failed: %s — truncating instead", exc)
+        # Fallback: just take the last line of each old message
+        lines = []
+        for m in older_messages:
+            first_line = m["content"].split("\n")[0][:120]
+            role_label = "Student" if m["role"] == "user" else "Character"
+            lines.append(f"- {role_label}: {first_line}")
+        return "Previous conversation summary:\n" + "\n".join(lines)
 
 
 def _build_thread_messages(
@@ -545,20 +589,59 @@ def _build_thread_messages(
         for msg in thread[-MAX_THREAD_MESSAGES:]:
             direction = msg.get("direction", "inbound")
             if direction == "outbound":
-                # Student's sent message
                 messages.append({"role": "user", "content": msg.get("body", "")})
             else:
-                # Character's reply (or system message — skip those)
                 sender_email = msg.get("sender_email", "")
                 if "noreply" not in sender_email:
                     messages.append({"role": "assistant", "content": msg.get("body", "")})
 
-    # If the current message isn't already in the thread (it was just sent
-    # and may not have been committed yet), append it
     if not messages or messages[-1].get("content") != current_message:
         messages.append({"role": "user", "content": current_message})
 
     return messages
+
+
+async def _maybe_summarise(
+    messages: list[dict[str, str]],
+    system_prompt: str,
+) -> list[dict[str, str]]:
+    """If the thread + persona exceed the context budget, summarise older
+    messages and keep the most recent exchanges verbatim.
+
+    Returns a (possibly shorter) messages array. The summary is injected
+    as a system-context user message at the start so the character has
+    the gist without the full transcript.
+
+    If the thread is within budget, returns it unchanged.
+    """
+    total_chars = len(system_prompt) + _estimate_chars(messages)
+
+    if total_chars <= CONTEXT_BUDGET_CHARS:
+        return messages  # fits fine — no summarisation needed
+
+    if len(messages) <= RECENT_KEEP:
+        return messages  # too few to split — send as-is
+
+    log.info(
+        "Thread exceeds context budget (%d chars > %d) — summarising %d older messages",
+        total_chars, CONTEXT_BUDGET_CHARS, len(messages) - RECENT_KEEP,
+    )
+
+    # Split: older messages to summarise, recent messages to keep verbatim
+    older = messages[:-RECENT_KEEP]
+    recent = messages[-RECENT_KEEP:]
+
+    summary = await _summarise_thread(older, system_prompt)
+
+    # Inject the summary as a user message at the start, then append
+    # the recent verbatim exchanges
+    summarised: list[dict[str, str]] = [
+        {"role": "user", "content": f"[Earlier conversation summary]\n{summary}"},
+        {"role": "assistant", "content": "Thanks — I have the context from our earlier messages. What would you like to discuss now?"},
+    ]
+    summarised.extend(recent)
+
+    return summarised
 
 
 async def _handle_character_reply(
@@ -596,6 +679,10 @@ async def _handle_character_reply(
         messages = _build_thread_messages(
             thread_id, student["id"], student_message
         )
+
+        # If the thread is too long for the context window, summarise
+        # older messages and keep the recent exchanges verbatim.
+        messages = await _maybe_summarise(messages, system_prompt)
 
         reply_body = await chat_completion(system_prompt, messages)
 
