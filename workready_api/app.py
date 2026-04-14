@@ -52,6 +52,7 @@ from workready_api.db import (
     list_prior_task_history,
     list_tasks_for_application,
     mark_message_read,
+    mark_student_login,
     mark_task_reviewed,
     mark_task_submitted,
     record_stage_result,
@@ -689,6 +690,7 @@ def get_student_state(email: str) -> StudentState:
         _send_welcome_email(email, name)
 
     student_id = student["id"]
+    mark_student_login(student_id)
     applications = get_student_applications(student_id)
 
     # Determine state from the most recent ACTIVE application (if any).
