@@ -19,6 +19,8 @@ Three concepts:
 
 from __future__ import annotations
 
+import logging
+import random
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -103,7 +105,11 @@ def is_character_available(company_slug: str, character_slug: str) -> bool:
             return_date = avail.get("return_date")
             if return_date:
                 try:
-                    rd = datetime.fromisoformat(return_date).replace(tzinfo=LOCAL_TZ)
+                    rd_parsed = datetime.fromisoformat(return_date)
+                    if rd_parsed.tzinfo is None:
+                        rd = rd_parsed.replace(tzinfo=LOCAL_TZ)
+                    else:
+                        rd = rd_parsed.astimezone(LOCAL_TZ)
                     if now_local >= rd:
                         return True
                 except (ValueError, TypeError):
@@ -112,7 +118,6 @@ def is_character_available(company_slug: str, character_slug: str) -> bool:
         return True
 
     # Character not in roster → treat as available but log noise
-    import logging
     logging.getLogger(__name__).warning(
         "is_character_available: character %s not in roster for %s",
         character_slug, company_slug,
@@ -142,8 +147,6 @@ def next_business_hours_slot(
     valid slot is found within that window, raises RuntimeError (should
     never happen in practice).
     """
-    import random
-
     if after_utc is None:
         after_utc = datetime.now(timezone.utc)
 
@@ -156,6 +159,7 @@ def next_business_hours_slot(
         result_local = probe_local + timedelta(minutes=jitter)
         if _is_within_business_hours(company_slug, result_local):
             return result_local.astimezone(timezone.utc).isoformat()
+        # Jitter overshot end-of-day — fall through to next valid slot
 
     # Otherwise walk forward to the next valid business-day start
     probe_local = probe_local.replace(
@@ -198,17 +202,18 @@ def compute_reply_deliver_at(
 
     def _walk_backwards_to_business_hours(anchor: datetime) -> datetime:
         """From `anchor`, walk backwards to the most recent plausible
-        business-hours moment and return that as UTC."""
-        cfg = _company_config(company_slug)
+        business-hours moment and return that as UTC. Fallback guarantees
+        a result strictly before `anchor`."""
         probe_local = anchor.astimezone(LOCAL_TZ)
         for _ in range(30):
             if _is_within_business_hours(company_slug, probe_local):
                 return probe_local.astimezone(timezone.utc)
             probe_local -= timedelta(hours=1)
-        # Fallback: earlier today 14:00 local
-        return anchor.astimezone(LOCAL_TZ).replace(
+        # Fallback: yesterday 14:00 local (guaranteed in the past)
+        fallback_local = (anchor.astimezone(LOCAL_TZ) - timedelta(days=1)).replace(
             hour=14, minute=0, second=0, microsecond=0,
-        ).astimezone(timezone.utc)
+        )
+        return fallback_local.astimezone(timezone.utc)
 
     if student_last_login_iso is None:
         return next_business_hours_slot(company_slug, now_utc)
