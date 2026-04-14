@@ -274,6 +274,9 @@ CREATE INDEX IF NOT EXISTS idx_lunchroom_posts_session
     ON lunchroom_posts(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_lunchroom_posts_deliver
     ON lunchroom_posts(session_id, deliver_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_messages_chat_thread
+    ON messages(student_id, application_id, channel, deliver_at)
+    WHERE channel = 'chat';
 """
 
 
