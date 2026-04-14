@@ -8,7 +8,6 @@ backdating trick. Runs against a fresh DB with stub LLM.
 
 import os
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 os.environ.setdefault("WORKREADY_DB", "/tmp/smoke_availability.db")
 os.environ.setdefault("LLM_PROVIDER", "stub")
@@ -56,15 +55,15 @@ assert is_public_holiday("test-co", xmas), "Christmas should be a holiday"
 assert not is_public_holiday("test-co", normal), "Random Wed should not be a holiday"
 print("  [1/6] public holiday detection OK")
 
-# --- Test 2: next slot skips holidays ---
+# --- Test 2: next_business_hours_slot returns a weekday for an after-hours input ---
 thursday_pre_anzac = datetime(2026, 4, 23, 15, 0, tzinfo=timezone.utc)
 slot = next_business_hours_slot("test-co", thursday_pre_anzac, jitter_minutes=0)
 slot_dt = datetime.fromisoformat(slot).astimezone(LOCAL_TZ)
-# 23 Apr 2026 is Thu, 25 Apr is Sat (ANZAC), 27 Apr is Mon
-# If we ask at Thu 15:00 local, we're already in hours so answer is ~Thu 23 Apr
-# Actually thursday_pre_anzac is UTC 15:00 which is Thu 23:00 local (past 17:00)
-# So next slot is Fri 24 Apr 09:00 local
-# But that's still before ANZAC so it's valid
+# UTC 15:00 on Thu 23 Apr = Perth 23:00 (past 17:00 business hours),
+# so the next valid slot should be Fri 24 Apr 09:00 local. This test
+# asserts the result lands on a weekday — it does NOT specifically
+# verify ANZAC-skipping (that weekend is a Sat, which is already
+# excluded by the weekday filter).
 assert slot_dt.weekday() in (0, 1, 2, 3, 4), f"Slot fell on weekend: {slot_dt}"
 print(f"  [2/6] next_business_hours_slot respects weekdays (returned {slot_dt.isoformat()})")
 
@@ -85,8 +84,12 @@ assert isinstance(result_carol, bool)
 print("  [3/6] is_character_available returns sensible values for all states")
 
 # --- Test 4: unknown character → warning + True ---
-result_unknown = is_character_available("test-co", "nonexistent")
-assert isinstance(result_unknown, bool)
+# Monkeypatch _now_local to return a time during business hours for this test
+from unittest.mock import patch
+with patch("workready_api.availability._now_local") as mock_now:
+    mock_now.return_value = datetime(2026, 4, 15, 10, 0, tzinfo=LOCAL_TZ)  # Wed 10 AM
+    result_unknown = is_character_available("test-co", "nonexistent")
+    assert result_unknown is True, "unknown slug should fall back to True (available)"
 print("  [4/6] is_character_available handles unknown slug gracefully")
 
 # --- Test 5: compute_reply_deliver_at — recent login ---
@@ -101,9 +104,9 @@ absent = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
 deliver_absent = compute_reply_deliver_at("test-co", absent)
 absent_dt = datetime.fromisoformat(deliver_absent)
 now_utc = datetime.now(timezone.utc)
-# Absent backdating: the result should be EARLIER than now (or equal)
-# to create the illusion the reply was sent during business hours while away
-assert absent_dt <= now_utc + timedelta(hours=1), \
+# Absent backdating: the result MUST be strictly in the past (<= now)
+# to create the illusion the reply arrived during business hours while away.
+assert absent_dt <= now_utc, \
     f"Absent-student deliver_at should not be in the future, got {deliver_absent}"
 print(f"  [6/6] compute_reply_deliver_at with absent student backdates correctly ({deliver_absent})")
 
