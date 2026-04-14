@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS students (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS postings (
@@ -459,6 +460,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "review_flag" not in msg_cols:
         conn.execute(
             "ALTER TABLE messages ADD COLUMN review_flag TEXT"
+        )
+
+    # --- Migration 10: students.last_login_at (business hours illusion) ---
+    student_cols = _table_columns(conn, "students")
+    if "last_login_at" not in student_cols:
+        conn.execute(
+            "ALTER TABLE students ADD COLUMN last_login_at TEXT"
         )
 
 
