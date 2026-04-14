@@ -514,7 +514,7 @@ def get_student_by_email(email: str) -> dict[str, Any] | None:
 
 
 def get_student_by_id(student_id: int) -> dict[str, Any] | None:
-    """Look up a student by internal id."""
+    """Look up a student by internal id. Returns dict with id/email/name/created_at/last_login_at."""
     with get_db() as conn:
         row = conn.execute(
             "SELECT id, email, name, created_at, last_login_at FROM students WHERE id = ?",
