@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS messages (
     is_read INTEGER DEFAULT 0,
     deliver_at TEXT NOT NULL,
     channel TEXT NOT NULL DEFAULT 'email',
+    review_flag TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -452,6 +453,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE messages ADD COLUMN channel TEXT NOT NULL "
             "DEFAULT 'email'"
+        )
+
+    # --- Migration 9: messages.review_flag (comms monitor classifier) ---
+    if "review_flag" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN review_flag TEXT"
         )
 
 
