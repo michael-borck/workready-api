@@ -90,6 +90,7 @@ def audit_company(slug: str) -> list[dict]:
     employee_name_to_slug = {
         (emp.get("name") or "").strip(): (emp.get("slug") or emp.get("id") or "")
         for emp in jobs_data.get("employees", [])
+        if (emp.get("name") or "").strip()  # exclude blank/missing names
     }
     for job in jobs_data.get("jobs", []):
         reports_to = job.get("reports_to", "")
