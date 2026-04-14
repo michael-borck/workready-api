@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 *.db
 .env
-data/
+/data/
 .DS_Store
 # Per-application upload directories created by manual API tests
 # (submit_resume writes uploads to a numeric application_id folder).
