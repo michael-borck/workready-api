@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS messages (
     related_stage TEXT,
     is_read INTEGER DEFAULT 0,
     deliver_at TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'email',
     created_at TEXT NOT NULL
 );
 
@@ -443,6 +444,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE interview_sessions ADD COLUMN kind TEXT NOT NULL "
             "DEFAULT 'hiring'"
+        )
+
+    # --- Migration 8: messages.channel (Stage 7 team chat) ---
+    msg_cols = _table_columns(conn, "messages")
+    if "channel" not in msg_cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN channel TEXT NOT NULL "
+            "DEFAULT 'email'"
         )
 
 
