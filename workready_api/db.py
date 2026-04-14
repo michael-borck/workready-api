@@ -504,10 +504,10 @@ def init_db() -> None:
 
 
 def get_student_by_email(email: str) -> dict[str, Any] | None:
-    """Look up a student by email. Returns dict with id/email/name/created_at."""
+    """Look up a student by email. Returns dict with id/email/name/created_at/last_login_at."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, email, name, created_at FROM students WHERE email = ?",
+            "SELECT id, email, name, created_at, last_login_at FROM students WHERE email = ?",
             (email,),
         ).fetchone()
     return dict(row) if row else None
@@ -517,7 +517,7 @@ def get_student_by_id(student_id: int) -> dict[str, Any] | None:
     """Look up a student by internal id."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, email, name, created_at FROM students WHERE id = ?",
+            "SELECT id, email, name, created_at, last_login_at FROM students WHERE id = ?",
             (student_id,),
         ).fetchone()
     return dict(row) if row else None
@@ -544,6 +544,19 @@ def get_or_create_student(email: str, name: str) -> dict[str, Any]:
         )
         student_id = cursor.lastrowid
     return {"id": student_id, "email": email, "name": name, "created_at": now}
+
+
+def mark_student_login(student_id: int) -> None:
+    """Record that the student just interacted with the portal.
+
+    Used by availability.next_business_hours_slot to decide whether
+    to backdate character replies when the student has been away.
+    """
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE students SET last_login_at = ? WHERE id = ?",
+            (_now(), student_id),
+        )
 
 
 def create_application(
