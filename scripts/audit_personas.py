@@ -83,10 +83,21 @@ def audit_company(slug: str) -> list[dict]:
                 })
 
     # Source 2: reports_to on each job
+    # Resolve against the employees[] roster first (authoritative slug from
+    # `id` or `slug` field), falling back to slugify() only if the name isn't in the
+    # roster. This handles cases where the display name has a title prefix
+    # (e.g. "Dr. Ravi Mehta") but the authoritative slug is just "ravi-mehta".
+    employee_name_to_slug = {
+        (emp.get("name") or "").strip(): (emp.get("slug") or emp.get("id") or "")
+        for emp in jobs_data.get("employees", [])
+    }
     for job in jobs_data.get("jobs", []):
         reports_to = job.get("reports_to", "")
         if reports_to:
-            char_slug = slugify(reports_to)
+            # Try roster lookup first, then fall back to slugify
+            char_slug = employee_name_to_slug.get(reports_to.strip(), "")
+            if not char_slug:
+                char_slug = slugify(reports_to)
             if char_slug not in existing_files:
                 gaps.append({
                     "company": slug,
