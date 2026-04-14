@@ -46,7 +46,14 @@ def load_jobs(company_dir: Path) -> dict:
     path = company_dir / "jobs.json"
     if not path.is_file():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(
+            f"WARNING: could not read {path}: {exc}",
+            file=sys.stderr,
+        )
+        return {}
 
 
 def audit_company(slug: str) -> list[dict]:
