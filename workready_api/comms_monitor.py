@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -36,6 +37,14 @@ logger = logging.getLogger(__name__)
 RecipientFlag = Literal["ok", "wrong_audience"]
 ToneFlag = Literal["ok", "sharp", "inappropriate"]
 ChannelFlag = Literal["ok", "wrong_channel"]
+
+_FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)```\s*$", re.DOTALL)
+
+
+def _strip_fence(text: str) -> str:
+    """Strip an optional ```json ... ``` fence, tolerant of trailing whitespace."""
+    m = _FENCE_RE.match(text.strip())
+    return m.group(1).strip() if m else text.strip()
 
 
 @dataclass
@@ -109,6 +118,10 @@ async def classify_outgoing(
     """
     classified_at = datetime.now(timezone.utc).isoformat()
 
+    # student_id and application_id are reserved for future audit logging;
+    # they are intentionally not forwarded to the LLM prompt.
+    _ = student_id, application_id
+
     # Stub short-circuit
     if os.environ.get("LLM_PROVIDER", "stub").lower() == "stub":
         return ClassificationResult(
@@ -136,7 +149,7 @@ async def classify_outgoing(
             "classify_outgoing: classifier unavailable (%s)", exc,
         )
         return ClassificationResult(
-            rationale=f"classifier_unavailable: {exc}",
+            rationale=f"classifier_unavailable: {exc}"[:500],
             classified_at=classified_at,
             status="classifier_unavailable",
         )
@@ -168,14 +181,7 @@ def _build_user_prompt(
 
 def _parse_classification(raw: str, classified_at: str) -> ClassificationResult:
     """Parse the classifier's JSON response, fail-open on any error."""
-    cleaned = (raw or "").strip()
-    if cleaned.startswith("```"):
-        first_nl = cleaned.find("\n")
-        if first_nl != -1:
-            cleaned = cleaned[first_nl + 1:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        cleaned = cleaned.strip()
+    cleaned = _strip_fence(raw or "")
 
     try:
         data = json.loads(cleaned)
@@ -200,7 +206,7 @@ def _parse_classification(raw: str, classified_at: str) -> ClassificationResult:
             "_parse_classification: bad response (%s) raw=%r", exc, raw[:200],
         )
         return ClassificationResult(
-            rationale=f"malformed_response: {exc}",
+            rationale=f"malformed_response: {exc}"[:500],
             classified_at=classified_at,
             status="classifier_unavailable",
         )
