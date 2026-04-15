@@ -438,6 +438,8 @@ class LunchroomPostRequest(BaseModel):
 
 
 class TeamMemberRef(BaseModel):
+    """Team or org member reference returned by /api/v1/team/{application_id}."""
+
     slug: str
     name: str
     role: str = ""
@@ -449,6 +451,8 @@ class TeamMemberRef(BaseModel):
 
 
 class TeamBusinessHours(BaseModel):
+    """Company business hours used by the chat/email availability logic."""
+
     start: int = 9
     end: int = 17
     days: list[int] = []
@@ -456,6 +460,8 @@ class TeamBusinessHours(BaseModel):
 
 
 class TeamDirectoryResponse(BaseModel):
+    """Team directory payload: immediate team, wider org, and business hours."""
+
     team: list[TeamMemberRef] = []
     org: list[TeamMemberRef] = []
     business_hours: TeamBusinessHours = TeamBusinessHours()

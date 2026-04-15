@@ -792,7 +792,7 @@ def get_team(application_id: int) -> TeamDirectoryResponse:
     app_data = get_application(application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
-    payload = get_team_for_application(application_id)
+    payload = get_team_for_application(application_id, app_data=app_data)
     return TeamDirectoryResponse(
         team=[TeamMemberRef(**m) for m in payload["team"]],
         org=[TeamMemberRef(**m) for m in payload["org"]],

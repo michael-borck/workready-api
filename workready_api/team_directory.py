@@ -18,7 +18,11 @@ from workready_api.db import get_application
 from workready_api.jobs import get_company, get_job
 
 
-def get_team_for_application(application_id: int) -> dict[str, Any]:
+def get_team_for_application(
+    application_id: int,
+    *,
+    app_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return the team directory for a student's application.
 
     Shape:
@@ -43,7 +47,8 @@ def get_team_for_application(application_id: int) -> dict[str, Any]:
     Returns {"team": [], "org": [], "business_hours": {}} if the
     application or company cannot be resolved.
     """
-    app_data = get_application(application_id)
+    if app_data is None:
+        app_data = get_application(application_id)
     if not app_data:
         return _empty()
 
