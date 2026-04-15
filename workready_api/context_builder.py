@@ -18,13 +18,13 @@ caching in v1.
 
 from __future__ import annotations
 
-import json
+import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from workready_api.db import (
-    get_active_exit_interview,
     get_active_performance_review,
     get_application,
     get_db,
@@ -36,6 +36,7 @@ from workready_api.db import (
 )
 from workready_api.jobs import get_company, get_job
 
+logger = logging.getLogger(__name__)
 
 THREAD_CHAR_CAP = 24_000
 VERBATIM_TAIL_COUNT = 4
@@ -64,7 +65,7 @@ class CharacterContext:
     coaching_notes: str = ""
 
 
-def build_character_context(
+async def build_character_context(
     student_id: int,
     character_slug: str,
     application_id: int,
@@ -97,7 +98,7 @@ def build_character_context(
     if total_chars > THREAD_CHAR_CAP and len(ctx.thread) > VERBATIM_TAIL_COUNT:
         tail = ctx.thread[-VERBATIM_TAIL_COUNT:]
         older = ctx.thread[:-VERBATIM_TAIL_COUNT]
-        ctx.thread_summary = _summarise_thread(older)
+        ctx.thread_summary = await _summarise_thread(older)
         ctx.thread = tail
 
     # Task state
@@ -161,7 +162,6 @@ def build_character_context(
 
 def _load_persona(company_slug: str, character_slug: str) -> str:
     """Load content/employees/<slug>-prompt.txt from the company repo."""
-    import os
     sites_dir = Path(os.environ.get(
         "SITES_DIR", str(Path(__file__).parent.parent.parent),
     ))
@@ -234,11 +234,12 @@ def _load_unified_thread(
         recipient = (d.get("recipient_email") or "").lower()
         direction = d.get("direction", "inbound")
 
-        involves_character = (
-            first_name in sender
-            or first_name in sender_email
-            or first_name in recipient
-        )
+        if direction == "outbound":
+            involves_character = first_name in recipient
+        else:
+            involves_character = (
+                first_name in sender or first_name in sender_email
+            )
         if not involves_character:
             continue
 
@@ -252,13 +253,12 @@ def _load_unified_thread(
     return thread
 
 
-def _summarise_thread(older: list[dict[str, str]]) -> str:
+async def _summarise_thread(older: list[dict[str, str]]) -> str:
     """Summarise an older portion of a thread into 2-3 sentences.
 
     Reuses the shared chat_completion path. In stub mode returns a
     deterministic short sentence for reproducibility.
     """
-    import os
     if os.environ.get("LLM_PROVIDER", "stub").lower() == "stub":
         n = len(older)
         return (
@@ -267,9 +267,7 @@ def _summarise_thread(older: list[dict[str, str]]) -> str:
             f"ongoing placement topics."
         )
 
-    # Real mode: one LLM call to summarise
-    from workready_api.interview import chat_completion
-    import asyncio
+    from workready_api.interview import chat_completion  # deferred: avoids circular import
 
     transcript = "\n".join(
         f"{m['who']}: {m['text'][:500]}" for m in older
@@ -281,9 +279,10 @@ def _summarise_thread(older: list[dict[str, str]]) -> str:
         "pleasantries.\n\n" + transcript
     )
     try:
-        return asyncio.get_event_loop().run_until_complete(
-            chat_completion("You summarise conversations tersely.",
-                            [{"role": "user", "content": prompt}])
+        return await chat_completion(
+            "You summarise conversations tersely.",
+            [{"role": "user", "content": prompt}],
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Thread summarisation failed: %s", exc)
         return f"Earlier in the thread: {len(older)} prior messages."
