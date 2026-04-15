@@ -432,3 +432,30 @@ class LunchroomPostRequest(BaseModel):
     """Request body for a student posting to the chat."""
 
     content: str
+
+
+# --- Stage 7: Team directory ---
+
+
+class TeamMemberRef(BaseModel):
+    slug: str
+    name: str
+    role: str = ""
+    email: str = ""
+    presence_ok: bool = False
+    availability_status: str = "available"
+    availability_note: str = ""
+    email_only: bool = False
+
+
+class TeamBusinessHours(BaseModel):
+    start: int = 9
+    end: int = 17
+    days: list[int] = []
+    holidays_region: str | None = None
+
+
+class TeamDirectoryResponse(BaseModel):
+    team: list[TeamMemberRef] = []
+    org: list[TeamMemberRef] = []
+    business_hours: TeamBusinessHours = TeamBusinessHours()

@@ -87,6 +87,7 @@ from workready_api.placement import (
 )
 from workready_api.task_reviewer import review_task_submission
 from workready_api.notifications import NotifyContent, notify
+from workready_api.team_directory import get_team_for_application
 from workready_api.models import (
     ApplicationDetail,
     ApplicationSummary,
@@ -124,6 +125,9 @@ from workready_api.models import (
     TaskList,
     TaskSubmitResult,
     TaskSummary,
+    TeamBusinessHours,
+    TeamDirectoryResponse,
+    TeamMemberRef,
 )
 from workready_api.pdf import extract_text
 
@@ -779,6 +783,20 @@ def get_application_detail(application_id: int) -> ApplicationDetail:
             StageResult(**s)
             for s in stages
         ],
+    )
+
+
+@app.get("/api/v1/team/{application_id}", response_model=TeamDirectoryResponse)
+def get_team(application_id: int) -> TeamDirectoryResponse:
+    """Return the team directory for a hired student's application."""
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    payload = get_team_for_application(application_id)
+    return TeamDirectoryResponse(
+        team=[TeamMemberRef(**m) for m in payload["team"]],
+        org=[TeamMemberRef(**m) for m in payload["org"]],
+        business_hours=TeamBusinessHours(**(payload["business_hours"] or {})),
     )
 
 
