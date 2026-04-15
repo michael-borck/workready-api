@@ -37,6 +37,7 @@ def get_team_for_application(application_id: int) -> dict[str, Any]:
             "presence_ok": bool,
             "availability_status": str,
             "availability_note": str,
+            "email_only": bool,
         }
 
     Returns {"team": [], "org": [], "business_hours": {}} if the
@@ -101,6 +102,20 @@ def _resolve_team_slugs(job: dict, employees: list[dict]) -> list[str]:
     return [e["slug"] for e in employees if e.get("slug")]
 
 
+_HONORIFICS = {"mr.", "ms.", "mrs.", "dr.", "prof.", "mx."}
+
+
+def _first_name_token(display_name: str, slug: str) -> str:
+    """Return the first non-honorific name token, lowercased.
+
+    Falls back to the slug if every token is an honorific or the name is empty.
+    """
+    for part in display_name.lower().split():
+        if part not in _HONORIFICS:
+            return part
+    return slug
+
+
 def _build_character_ref(
     company_slug: str,
     employee: dict,
@@ -117,7 +132,7 @@ def _build_character_ref(
     note = avail.get("note", "") or ""
 
     domain = _domain_for_company(company_slug, company)
-    first_name = name.split()[0].lower() if name else slug
+    first_name = _first_name_token(name, slug) if name else slug
     email = f"{first_name}.{slug.split('-', 1)[-1]}@{domain}" if slug else ""
 
     return {
