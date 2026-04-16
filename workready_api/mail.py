@@ -370,7 +370,7 @@ async def compose_message(
                     )
 
             if classification.any_flag():
-                await _schedule_bounceback(
+                _schedule_bounceback(
                     classification=classification,
                     student=student,
                     application_id=app_data["id"],
@@ -530,7 +530,7 @@ async def reply_to_message(
                     )
 
             if classification.any_flag():
-                await _schedule_bounceback(
+                _schedule_bounceback(
                     classification=classification,
                     student=student,
                     application_id=app_data["id"],
@@ -663,7 +663,7 @@ def get_email_directory() -> dict:
 # --- Internal helpers ---
 
 
-async def _schedule_bounceback(
+def _schedule_bounceback(
     *,
     classification,
     student: dict,
@@ -707,7 +707,7 @@ async def _schedule_bounceback(
             body=body,
             inbox=inbox,
             application_id=application_id,
-            related_stage="placement",
+            related_stage=app_data.get("current_stage", "placement") if app_data else "placement",
             deliver_at=deliver_at,
         )
         return
@@ -731,7 +731,7 @@ async def _schedule_bounceback(
             body=body,
             inbox=inbox,
             application_id=application_id,
-            related_stage="placement",
+            related_stage=app_data.get("current_stage", "placement") if app_data else "placement",
             deliver_at=deliver_at,
         )
         return
@@ -751,10 +751,15 @@ async def _schedule_bounceback(
             body=body,
             inbox="personal",
             application_id=application_id,
-            related_stage="placement",
+            related_stage=app_data.get("current_stage", "placement") if app_data else "placement",
             deliver_at=deliver_at,
         )
         return
+
+    log.warning(
+        "_schedule_bounceback: unhandled flag combo for student %s: %s",
+        student["id"], classification.to_json(),
+    )
 
 
 def _get_character_persona(company_slug: str, character_name: str) -> str:
