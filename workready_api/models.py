@@ -465,3 +465,31 @@ class TeamDirectoryResponse(BaseModel):
     team: list[TeamMemberRef] = []
     org: list[TeamMemberRef] = []
     business_hours: TeamBusinessHours = TeamBusinessHours()
+
+
+# --- Stage 7: Chat routes ---
+
+
+class ChatSendRequest(BaseModel):
+    application_id: int
+    character_slug: str
+    content: str
+
+
+class ChatMessageModel(BaseModel):
+    id: int
+    channel: str
+    author: str  # "student" | "character"
+    sender_name: str
+    content: str
+    created_at: str
+    deliver_at: str | None = None
+
+
+class ChatThreadResponse(BaseModel):
+    application_id: int
+    character_slug: str
+    character_name: str
+    character_role: str = ""
+    presence_ok: bool = False
+    messages: list[ChatMessageModel] = []
