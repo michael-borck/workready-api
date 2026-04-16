@@ -1058,6 +1058,7 @@ def create_message(
     student_email: str | None = None,
     booking_id: int | None = None,
     thread_id: int | None = None,
+    channel: str = "email",
 ) -> int:
     """Create an inbound inbox message. Returns the message ID.
 
@@ -1076,12 +1077,12 @@ def create_message(
             """INSERT INTO messages
                (student_id, student_email, inbox, sender_name, sender_role,
                 sender_email, subject, body, application_id, booking_id,
-                related_stage, direction, thread_id, deliver_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inbound', ?, ?, ?)""",
+                related_stage, direction, channel, thread_id, deliver_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inbound', ?, ?, ?, ?)""",
             (
                 student_id, student_email, inbox, sender_name, sender_role,
                 sender_email, subject, body, application_id, booking_id,
-                related_stage, thread_id, deliver_at or now, now,
+                related_stage, channel, thread_id, deliver_at or now, now,
             ),
         )
         return cursor.lastrowid  # type: ignore[return-value]
@@ -1153,6 +1154,7 @@ def create_outbound_message(
     thread_id: int | None = None,
     has_attachment: bool = False,
     status: str = "delivered",
+    channel: str = "email",
 ) -> int:
     """Create an outbound message (student → recipient). Returns message ID.
 
@@ -1164,13 +1166,13 @@ def create_outbound_message(
             """INSERT INTO messages
                (student_id, student_email, inbox, sender_name, sender_role,
                 sender_email, subject, body, direction, recipient_email,
-                thread_id, status, has_attachment, is_read, deliver_at, created_at)
+                channel, thread_id, status, has_attachment, is_read, deliver_at, created_at)
                VALUES (?, ?, 'sent', ?, '', ?, ?, ?, 'outbound', ?,
-                       ?, ?, ?, 1, ?, ?)""",
+                       ?, ?, ?, ?, 1, ?, ?)""",
             (
                 student_id, student_email, student_email, student_email,
                 subject, body, recipient_email,
-                thread_id, status, int(has_attachment), now, now,
+                channel, thread_id, status, int(has_attachment), now, now,
             ),
         )
         msg_id = cursor.lastrowid

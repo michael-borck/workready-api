@@ -128,6 +128,9 @@ from workready_api.models import (
     TeamBusinessHours,
     TeamDirectoryResponse,
     TeamMemberRef,
+    ChatSendRequest,
+    ChatMessageModel,
+    ChatThreadResponse,
 )
 from workready_api.pdf import extract_text
 
@@ -3165,4 +3168,214 @@ def _build_chat_state(session_id: int) -> LunchroomChatState:
         hard_cap=scheduling.LUNCHROOM_HARD_CAP,
         delivered_count=len(posts),
         posts=[_post_row_to_model(p) for p in posts],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chat routes (stage 7)
+# ---------------------------------------------------------------------------
+
+
+def _build_chat_system_prompt(ctx) -> str:
+    """Flatten a CharacterContext into a chat-style system prompt."""
+    task_lines: list[str] = []
+    if ctx.active_tasks:
+        task_lines.append("ACTIVE TASKS:")
+        for t in ctx.active_tasks:
+            task_lines.append(f"  - #{t.get('sequence')}: {t.get('title')} ({t.get('status')})")
+            if t.get("brief"):
+                task_lines.append(f"    Brief: {t['brief'][:200]}")
+
+    past_lines: list[str] = []
+    if ctx.past_tasks:
+        past_lines.append("\nCOMPLETED TASKS:")
+        for t in ctx.past_tasks:
+            score = f"({t['score']}/100)" if t.get("score") else ""
+            past_lines.append(f"  - #{t.get('sequence')}: {t.get('title')} {score}")
+
+    summary_block = (
+        f"\nEarlier in your thread with {ctx.student_first_name}: "
+        f"{ctx.thread_summary}"
+        if ctx.thread_summary else ""
+    )
+
+    return f"""{ctx.persona_prompt}
+
+You are {ctx.character_name}, {ctx.character_role} at {ctx.company_name}. You're having a casual workplace chat with {ctx.student_first_name}, an intern on your team working as a {ctx.job_title}.
+
+This is a chat (not email) — keep messages short: 1-2 sentences, the way you'd actually type in a workplace Slack or Teams. Be warm, professional, in-character.
+{summary_block}
+
+{chr(10).join(task_lines) if task_lines else ""}
+{chr(10).join(past_lines) if past_lines else ""}
+
+Respond naturally to what the student just said. Stay in character.
+"""
+
+
+@app.post("/api/v1/chat/send")
+async def chat_send(req: ChatSendRequest) -> dict:
+    """Send a chat message from student to a team character."""
+    from workready_api.comms_monitor import classify_outgoing
+    from workready_api.context_builder import build_character_context
+    from workready_api.availability import compute_reply_deliver_at
+    from workready_api.mail import _schedule_bounceback
+    from workready_api.db import POST_HIRE_STAGES, create_outbound_message, create_message as _create_inbound
+
+    app_data = get_application(req.application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if app_data.get("current_stage") not in POST_HIRE_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail="Chat is only available during your placement",
+        )
+
+    student = get_student_by_id(app_data["student_id"]) or {}
+    company_slug = app_data["company_slug"]
+    char_email = req.character_slug + "@" + company_slug.replace("-", "") + ".com.au"
+
+    # 1. Persist student's outbound message
+    student_msg_id = create_outbound_message(
+        student_id=student["id"],
+        student_email=student.get("email", ""),
+        recipient_email=char_email,
+        subject="",
+        body=req.content,
+        channel="chat",
+    )
+
+    # 2. Classify
+    classification = await classify_outgoing(
+        student_id=student["id"],
+        application_id=req.application_id,
+        channel="chat",
+        recipient=req.character_slug,
+        subject="",
+        body=req.content,
+        student_stage=app_data.get("current_stage", ""),
+    )
+
+    # 3. Write review_flag if needed
+    if classification.any_flag() or classification.status != "ok":
+        from workready_api.db import get_db as _gdb
+        with _gdb() as _conn:
+            _conn.execute(
+                "UPDATE messages SET review_flag = ? WHERE id = ?",
+                (classification.to_json(), student_msg_id),
+            )
+
+    # 4. Branch: bounce-back or real reply
+    if classification.any_flag():
+        _schedule_bounceback(
+            classification=classification,
+            student=student,
+            application_id=req.application_id,
+            app_data=app_data,
+            recipient_email=req.character_slug,
+            subject="",
+            inbox="work",
+        )
+    else:
+        ctx = await build_character_context(
+            student_id=student["id"],
+            character_slug=req.character_slug,
+            application_id=req.application_id,
+        )
+
+        system_prompt = _build_chat_system_prompt(ctx)
+        messages = [
+            {"role": "assistant", "content": m["text"]}
+            if m["who"] == "character"
+            else {"role": "user", "content": m["text"]}
+            for m in ctx.thread
+        ]
+        messages.append({"role": "user", "content": req.content})
+
+        reply_text = await chat_completion(system_prompt, messages)
+
+        deliver_at = compute_reply_deliver_at(
+            company_slug,
+            student.get("last_login_at"),
+        )
+
+        _create_inbound(
+            student_id=student["id"],
+            student_email=student.get("email", ""),
+            sender_name=ctx.character_name,
+            sender_role=ctx.character_role + " at " + ctx.company_name,
+            sender_email=char_email,
+            subject="",
+            body=reply_text,
+            inbox="work",
+            application_id=req.application_id,
+            related_stage=app_data.get("current_stage", "placement"),
+            deliver_at=deliver_at,
+            channel="chat",
+        )
+
+    return {"message_id": student_msg_id, "flagged": classification.any_flag()}
+
+
+@app.get("/api/v1/chat/thread/{application_id}/{character_slug}", response_model=ChatThreadResponse)
+def chat_thread(application_id: int, character_slug: str) -> ChatThreadResponse:
+    """Return the delivered chat messages between a student and a character."""
+    app_data = get_application(application_id)
+    if not app_data:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    from workready_api.db import get_db as _gdb
+    from workready_api.db import _now as _now_iso
+
+    now = _now_iso()
+    with _gdb() as conn:
+        rows = conn.execute(
+            """SELECT * FROM messages
+               WHERE application_id = ?
+                 AND channel = 'chat'
+                 AND (deliver_at IS NULL OR deliver_at <= ?)
+               ORDER BY id ASC""",
+            (application_id, now),
+        ).fetchall()
+
+    slug_first = character_slug.split("-")[0].lower()
+    messages: list[ChatMessageModel] = []
+    for row in rows:
+        d = dict(row)
+        sender = (d.get("sender_name") or "").lower()
+        recipient = (d.get("recipient_email") or "").lower()
+        direction = d.get("direction", "inbound")
+
+        involves = (
+            (direction == "outbound" and character_slug in recipient)
+            or (direction == "inbound" and slug_first in sender)
+        )
+        if not involves:
+            continue
+
+        messages.append(ChatMessageModel(
+            id=d["id"],
+            channel="chat",
+            author="student" if direction == "outbound" else "character",
+            sender_name=d.get("sender_name") or "",
+            content=d.get("body") or "",
+            created_at=d.get("created_at") or "",
+            deliver_at=d.get("deliver_at"),
+        ))
+
+    from workready_api.jobs import get_company
+    company = get_company(app_data["company_slug"]) or {}
+    char = next(
+        (e for e in company.get("employees", []) if e.get("slug") == character_slug),
+        {"name": character_slug, "role": ""},
+    )
+
+    from workready_api.availability import is_character_available
+    return ChatThreadResponse(
+        application_id=application_id,
+        character_slug=character_slug,
+        character_name=char.get("name", character_slug),
+        character_role=char.get("role", ""),
+        presence_ok=is_character_available(app_data["company_slug"], character_slug),
+        messages=messages,
     )
