@@ -50,6 +50,101 @@ ATTACHMENTS_DIR = Path(
 
 MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024  # 5 MB
 
+# ============================================================
+# Comms monitor — proxy characters for bounce-backs
+# ============================================================
+
+JENNY_PROXY_SENDER_NAME = "Jenny Kirkwood"
+JENNY_PROXY_SENDER_ROLE = "Executive Assistant to the Leadership Team"
+
+
+def _jenny_email_for_company(company_slug: str) -> str:
+    """Jenny's email on this company's domain. Pattern: jenny.kirkwood@<domain>."""
+    domain = company_slug.replace("-", "") + ".com.au"
+    return f"jenny.kirkwood@{domain}"
+
+
+def _jenny_bounceback_body(
+    *,
+    student_first_name: str,
+    original_subject: str,
+    rationale: str,
+    company_name: str,
+) -> str:
+    """Generate a warm, in-character bounce-back from Jenny."""
+    redirect_hint = ""
+    if "facilities" in rationale.lower():
+        redirect_hint = "facilities"
+    elif "hr" in rationale.lower() or "people" in rationale.lower():
+        redirect_hint = "HR / People team"
+    elif "it" in rationale.lower() or "helpdesk" in rationale.lower():
+        redirect_hint = "IT helpdesk"
+    else:
+        redirect_hint = "the right team"
+
+    redirect_line = (
+        f"For this one, the best people to ask are the {redirect_hint} "
+        f"team — they'll be much faster than routing through us."
+        if redirect_hint != "the right team"
+        else f"I'd suggest asking {redirect_hint} directly — they'll be "
+             f"much faster than routing through executive comms."
+    )
+
+    return (
+        f"Hi {student_first_name},\n\n"
+        f"Thanks for your message. I manage inbound requests for the "
+        f"executive team at {company_name}, so your note landed with me "
+        f"first. {redirect_line}\n\n"
+        f"Welcome to the team — hope you're settling in well.\n\n"
+        f"— Jenny Kirkwood\n"
+        f"  Executive Assistant\n"
+        f"  {company_name}"
+    )
+
+
+def _mentor_tone_note_body(
+    *,
+    student_first_name: str,
+    mentor_name: str,
+    original_subject: str,
+    rationale: str,
+    tone_flag: str,
+) -> str:
+    """Gentle note from the mentor about tone."""
+    tone_phrase = (
+        "came across a bit sharper than I think you meant"
+        if tone_flag == "sharp"
+        else "wasn't quite the register we'd use in work comms"
+    )
+    return (
+        f"Hi {student_first_name},\n\n"
+        f"Quick one — I noticed your message \"{original_subject}\" "
+        f"{tone_phrase}. Everything OK? Sometimes a sharp message can "
+        f"land harder than we meant, especially over email where there's "
+        f"no tone of voice to soften things.\n\n"
+        f"No big deal, just thought I'd flag it. Happy to chat if anything's "
+        f"bothering you.\n\n"
+        f"— {mentor_name}"
+    )
+
+
+def _wrong_channel_system_body(
+    *,
+    student_first_name: str,
+    original_subject: str,
+) -> str:
+    """System note when personal inbox is used for work."""
+    return (
+        f"Hi {student_first_name},\n\n"
+        f"Quick heads-up: you just sent \"{original_subject}\" from your "
+        f"personal email, but it looks like a work matter. For work "
+        f"communications, use your WorkReady portal work inbox — it "
+        f"keeps the two streams separate and makes it easier for your "
+        f"mentor and colleagues to find things later.\n\n"
+        f"No harm done this time — this is just a reminder.\n\n"
+        f"— WorkReady"
+    )
+
 
 # --- Models ---
 
