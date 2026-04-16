@@ -3243,6 +3243,7 @@ async def chat_send(req: ChatSendRequest) -> dict:
         subject="",
         body=req.content,
         channel="chat",
+        application_id=req.application_id,
     )
 
     # 2. Classify

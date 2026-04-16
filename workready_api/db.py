@@ -1155,6 +1155,7 @@ def create_outbound_message(
     has_attachment: bool = False,
     status: str = "delivered",
     channel: str = "email",
+    application_id: int | None = None,
 ) -> int:
     """Create an outbound message (student → recipient). Returns message ID.
 
@@ -1166,13 +1167,15 @@ def create_outbound_message(
             """INSERT INTO messages
                (student_id, student_email, inbox, sender_name, sender_role,
                 sender_email, subject, body, direction, recipient_email,
-                channel, thread_id, status, has_attachment, is_read, deliver_at, created_at)
+                channel, thread_id, status, has_attachment, is_read, deliver_at,
+                created_at, application_id)
                VALUES (?, ?, 'sent', ?, '', ?, ?, ?, 'outbound', ?,
-                       ?, ?, ?, ?, 1, ?, ?)""",
+                       ?, ?, ?, ?, 1, ?, ?, ?)""",
             (
                 student_id, student_email, student_email, student_email,
                 subject, body, recipient_email,
                 channel, thread_id, status, int(has_attachment), now, now,
+                application_id,
             ),
         )
         msg_id = cursor.lastrowid
