@@ -3273,7 +3273,7 @@ async def chat_send(req: ChatSendRequest) -> dict:
             application_id=req.application_id,
             app_data=app_data,
             recipient_email=req.character_slug,
-            subject="",
+            subject="chat message",
             inbox="work",
         )
     else:
@@ -3292,7 +3292,14 @@ async def chat_send(req: ChatSendRequest) -> dict:
         ]
         messages.append({"role": "user", "content": req.content})
 
-        reply_text = await chat_completion(system_prompt, messages)
+        import os as _os
+        if _os.environ.get("LLM_PROVIDER", "stub").lower() == "stub":
+            reply_text = (
+                f"Hey {student.get('name', '').split()[0] if student.get('name') else 'there'}! "
+                f"Thanks for the message. Let me look into that and get back to you shortly."
+            )
+        else:
+            reply_text = await chat_completion(system_prompt, messages)
 
         deliver_at = compute_reply_deliver_at(
             company_slug,
