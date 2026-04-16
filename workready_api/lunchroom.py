@@ -374,7 +374,7 @@ def create_invitation(
         body=body,
         inbox="work",
         application_id=application_id,
-        related_stage="lunchroom",
+        related_stage="mid_placement",
         deliver_at=deliver_at,
     )
 
@@ -520,7 +520,7 @@ def maybe_send_decline_check_in(application_id: int) -> bool:
         return False
 
     # Only send once — use a flag on the application. For v1 we detect
-    # "already sent" by checking for an existing related_stage='lunchroom'
+    # "already sent" by checking for an existing related_stage='mid_placement'
     # message from the mentor with a specific subject marker.
     app_data = get_application(application_id)
     if not app_data:
@@ -530,7 +530,7 @@ def maybe_send_decline_check_in(application_id: int) -> bool:
     with get_db() as conn:
         row = conn.execute(
             "SELECT 1 FROM messages WHERE application_id = ? "
-            "AND related_stage = 'lunchroom' AND subject = ?",
+            "AND related_stage = 'mid_placement' AND subject = ?",
             (application_id, marker_subject),
         ).fetchone()
     if row:
@@ -564,6 +564,6 @@ def maybe_send_decline_check_in(application_id: int) -> bool:
         body=body,
         inbox="work",
         application_id=application_id,
-        related_stage="lunchroom",
+        related_stage="mid_placement",
     )
     return True

@@ -58,8 +58,8 @@ def build_journey_report(application_id: int) -> dict[str, Any] | None:
     - resume: stage 2 summary
     - interview: stage 3 summary
     - tasks: stage 4 summary
-    - lunchroom: stage 5 summary
-    - exit_interview: stage 6 summary
+    - lunchroom: stage 5 summary (mid-placement moment)
+    - exit_interview: stage 6 summary (exit interview)
     - timeline: chronological list of key events for a quick scan
     """
     app_data = get_application(application_id)
@@ -260,7 +260,7 @@ def _build_lunchroom_section(application_id: int) -> dict[str, Any]:
 
 
 def _build_exit_section(application_id: int) -> dict[str, Any]:
-    results = get_stage_results(application_id, "exit_interview")
+    results = get_stage_results(application_id, "exit")
     with get_db() as conn:
         row = conn.execute(
             "SELECT id, transcript_json, final_score, feedback_json, "

@@ -164,7 +164,7 @@ app = FastAPI(
     description=(
         "Backend for the WorkReady internship simulation. "
         "Tracks student progress through 6 stages: job board, resume, "
-        "interview, work task, lunchroom moment, exit interview."
+        "interview, placement, mid-placement moment, exit interview."
     ),
     lifespan=lifespan,
 )
@@ -710,7 +710,7 @@ def get_student_state(email: str) -> StudentState:
         stage = latest["current_stage"]
         if stage == "resume":
             state = "APPLIED"
-        elif stage in ("interview", "work_task", "lunchroom", "exit_interview"):
+        elif stage in ("interview", "placement", "mid_placement", "exit"):
             state = "HIRED"
         elif stage == "completed":
             state = "COMPLETED"
@@ -857,7 +857,7 @@ def resign_application(application_id: int) -> dict:
                 f"— WorkReady"
             ),
             application_id=application_id,
-            related_stage="exit_interview",
+            related_stage="exit",
         ),
     )
 
@@ -2027,10 +2027,10 @@ async def interview_end(session_id: int) -> InterviewSession:
     )
 
     if result.proceed_to_interview:
-        # Passed — advance to work_task stage and activate placement:
+        # Passed — advance to placement stage and activate placement:
         # creates 3 gated tasks, flips status to hired, schedules the
         # mentor's welcome + first task brief to deliver_at.
-        advance_stage(application_id, "work_task")
+        advance_stage(application_id, "placement")
         activate_work_placement(application_id, interview_deliver_at)
         notify(
             student_email=student_email,
@@ -2051,7 +2051,7 @@ async def interview_end(session_id: int) -> InterviewSession:
                     f"\n{feedback_block}"
                 ),
                 application_id=application_id,
-                related_stage="work_task",
+                related_stage="placement",
                 deliver_at=interview_deliver_at,
             ),
         )
@@ -2138,7 +2138,7 @@ async def exit_interview_start(req: InterviewStartRequest) -> InterviewSession:
     app_data = get_application(req.application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
-    if app_data["current_stage"] != "exit_interview":
+    if app_data["current_stage"] != "exit":
         raise HTTPException(
             status_code=400,
             detail=(
@@ -2239,7 +2239,7 @@ async def exit_interview_end(session_id: int) -> InterviewSession:
 
     record_stage_result(
         application_id=application_id,
-        stage="exit_interview",
+        stage="exit",
         status="passed",
         score=result.fit_score,
         feedback=feedback_dict,
@@ -2274,7 +2274,7 @@ async def exit_interview_end(session_id: int) -> InterviewSession:
                 f"— WorkReady"
             ),
             application_id=application_id,
-            related_stage="exit_interview",
+            related_stage="exit",
         ),
     )
 
@@ -2335,12 +2335,12 @@ async def perf_review_start(req: InterviewStartRequest) -> InterviewSession:
     app_data = get_application(req.application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
-    if app_data.get("current_stage") != "work_task":
+    if app_data.get("current_stage") != "placement":
         raise HTTPException(
             status_code=400,
             detail=(
-                "Performance review is only available during the work "
-                "task stage."
+                "Performance review is only available during the placement "
+                "stage."
             ),
         )
 
@@ -2706,18 +2706,18 @@ async def submit_task(
             body=feedback_body,
             inbox="work",
             application_id=application_id,
-            related_stage="work_task",
+            related_stage="placement",
             deliver_at=review_deliver_at,
         )
 
         # Final-task handoff: the student has finished all work tasks.
-        # Advance to Stage 6 (exit interview) and drop a wrapup message
-        # in the work inbox pointing the student at the exit interview
+        # Advance to Stage 6 (exit) and drop a wrapup message
+        # in the work inbox pointing the student at the exit
         # view in their portal. The exit interview view auto-creates the
         # session on first visit (no booking flow at this stage — it's a
         # walk-up reflective conversation, not a scheduled meeting).
         if is_final_task:
-            advance_stage(application_id, "exit_interview")
+            advance_stage(application_id, "exit")
             wrapup_body = (
                 f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
                 f"You've completed all of your work tasks at {company_name}. "
@@ -2740,7 +2740,7 @@ async def submit_task(
                 body=wrapup_body,
                 inbox="work",
                 application_id=application_id,
-                related_stage="exit_interview",
+                related_stage="exit",
                 deliver_at=review_deliver_at,
             )
 
@@ -2770,7 +2770,7 @@ async def submit_task(
                 body=perf_review_body,
                 inbox="work",
                 application_id=application_id,
-                related_stage="work_task",
+                related_stage="placement",
                 deliver_at=review_deliver_at,
             )
         except Exception:  # noqa: BLE001

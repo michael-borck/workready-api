@@ -50,7 +50,7 @@ students (email PK, name)
             └── stage_results (stage, status, score, feedback, attempt)
 ```
 
-Stages: `job_board` → `resume` → `interview` → `work_task` → `lunchroom` → `exit_interview`
+Stages: `job_board` → `resume` → `interview` → `placement` → `mid_placement` → `exit`
 
 ## Environment Variables
 

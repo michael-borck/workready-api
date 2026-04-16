@@ -193,7 +193,7 @@ def activate_work_placement(application_id: int, deliver_at: str) -> None:
         body=welcome_body,
         inbox="work",
         application_id=application_id,
-        related_stage="work_task",
+        related_stage="placement",
         deliver_at=deliver_at,
     )
 
@@ -220,7 +220,7 @@ def activate_work_placement(application_id: int, deliver_at: str) -> None:
             body=brief_body,
             inbox="work",
             application_id=application_id,
-            related_stage="work_task",
+            related_stage="placement",
             deliver_at=deliver_at,
         )
 
@@ -288,7 +288,7 @@ def reveal_next_task_after_submission(application_id: int) -> dict[str, Any] | N
         body=brief_body,
         inbox="work",
         application_id=application_id,
-        related_stage="work_task",
+        related_stage="placement",
         deliver_at=reveal_at,
     )
 

@@ -1609,7 +1609,7 @@ init_db()
 s = get_or_create_student('td@example.com', 'TD Test')
 app_id = create_application(student_id=s['id'], student_email='td@example.com',
   company_slug='ironvale-resources', job_slug='junior-analyst', job_title='Junior Analyst')
-advance_stage(app_id, 'work_task')
+advance_stage(app_id, 'placement')
 print(f'APP_ID={app_id}')
 " 2>&1 | grep APP_ID
 curl -s http://127.0.0.1:8701/api/v1/team/1 | uv run python -m json.tool | head -30
@@ -2000,7 +2000,7 @@ app_id = create_application(
     student_id=s["id"], student_email="ctx@example.com",
     company_slug="ctx-test", job_slug="analyst", job_title="Analyst",
 )
-advance_stage(app_id, "work_task")
+advance_stage(app_id, "placement")
 
 # Seed prior stage results
 record_stage_result(
@@ -2030,13 +2030,13 @@ create_message(
     student_id=s["id"], student_email="ctx@example.com",
     sender_name="Karen Whitfield", sender_role="Ops Lead at Context Test Co",
     subject="Welcome!", body="Hi Alex, welcome to the team. Let me know if you have questions.",
-    inbox="work", application_id=app_id, related_stage="work_task",
+    inbox="work", application_id=app_id, related_stage="placement",
 )
 create_message(
     student_id=s["id"], student_email="ctx@example.com",
     sender_name="Alex Tester",
     subject="Re: Welcome!", body="Thanks Karen, quick question about task 1...",
-    inbox="work", application_id=app_id, related_stage="work_task",
+    inbox="work", application_id=app_id, related_stage="placement",
     direction="outbound",
     sender_email="alex@contexttest.com.au",
     recipient_email="karen.whitfield@contexttest.com.au",
@@ -2054,7 +2054,7 @@ ctx = build_character_context(
 assert ctx.student_first_name == "Alex", f"got {ctx.student_first_name}"
 assert ctx.company_name == "Context Test Co"
 assert ctx.job_title == "Analyst"
-assert ctx.current_stage == "work_task"
+assert ctx.current_stage == "placement"
 assert ctx.character_name == "Karen Whitfield"
 assert ctx.resume_summary is not None
 assert ctx.resume_summary["score"] == 72
@@ -2076,7 +2076,7 @@ with get_db() as conn:
             student_id=s["id"], student_email="ctx@example.com",
             sender_name="Karen Whitfield", sender_role="Ops Lead",
             subject=f"Msg {i}", body="x" * 800,
-            inbox="work", application_id=app_id, related_stage="work_task",
+            inbox="work", application_id=app_id, related_stage="placement",
         )
 
 ctx2 = build_character_context(
@@ -2693,7 +2693,7 @@ async def _schedule_bounceback(
             body=body,
             inbox=inbox,
             application_id=application_id,
-            related_stage="work_task",
+            related_stage="placement",
             deliver_at=deliver_at,
         )
         return
@@ -2717,7 +2717,7 @@ async def _schedule_bounceback(
             body=body,
             inbox=inbox,
             application_id=application_id,
-            related_stage="work_task",
+            related_stage="placement",
             deliver_at=deliver_at,
         )
         return
@@ -2737,7 +2737,7 @@ async def _schedule_bounceback(
             body=body,
             inbox="personal",  # system notes land in personal
             application_id=application_id,
-            related_stage="work_task",
+            related_stage="placement",
             deliver_at=deliver_at,
         )
         return
@@ -2812,7 +2812,7 @@ app_id = create_application(
     student_id=s["id"], student_email="mail@example.com",
     company_slug="mail-test", job_slug="analyst", job_title="Analyst",
 )
-advance_stage(app_id, "work_task")
+advance_stage(app_id, "placement")
 
 # --- Test 1: wrong_audience → Jenny bounce-back ---
 flag_audience = ClassificationResult(
@@ -2824,7 +2824,7 @@ asyncio.run(_schedule_bounceback(
     student=s,
     application_id=app_id,
     app_data={"company_slug": "mail-test", "job_slug": "analyst",
-              "current_stage": "work_task"},
+              "current_stage": "placement"},
     recipient_email="ceo@mailtest.com.au",
     subject="Where's the coffee machine?",
     inbox="work",
@@ -2851,7 +2851,7 @@ asyncio.run(_schedule_bounceback(
     student=s,
     application_id=app_id,
     app_data={"company_slug": "mail-test", "job_slug": "analyst",
-              "current_stage": "work_task"},
+              "current_stage": "placement"},
     recipient_email="karen.whitfield@mailtest.com.au",
     subject="Task 2",
     inbox="work",
@@ -2877,7 +2877,7 @@ asyncio.run(_schedule_bounceback(
     student=s,
     application_id=app_id,
     app_data={"company_slug": "mail-test", "job_slug": "analyst",
-              "current_stage": "work_task"},
+              "current_stage": "placement"},
     recipient_email="karen.whitfield@mailtest.com.au",
     subject="Quick question",
     inbox="personal",
@@ -2999,7 +2999,7 @@ async def chat_send(req: ChatSendRequest) -> dict:
     app_data = get_application(req.application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
-    if app_data.get("current_stage") != "work_task":
+    if app_data.get("current_stage") != "placement":
         raise HTTPException(
             status_code=400,
             detail="Chat is only available while on placement",
@@ -3021,7 +3021,7 @@ async def chat_send(req: ChatSendRequest) -> dict:
         body=req.content,
         inbox="work",
         application_id=req.application_id,
-        related_stage="work_task",
+        related_stage="placement",
         direction="outbound",
         channel="chat",
     )
@@ -3092,7 +3092,7 @@ async def chat_send(req: ChatSendRequest) -> dict:
             body=reply_text,
             inbox="work",
             application_id=req.application_id,
-            related_stage="work_task",
+            related_stage="placement",
             direction="inbound",
             channel="chat",
             deliver_at=deliver_at,
@@ -3287,7 +3287,7 @@ app_id = create_application(
     student_id=s["id"], student_email="chat@example.com",
     company_slug="chat-test", job_slug="analyst", job_title="Analyst",
 )
-advance_stage(app_id, "work_task")
+advance_stage(app_id, "placement")
 
 # Boot the server
 proc = subprocess.Popen(
@@ -3467,7 +3467,7 @@ function loadTeamDirectory() {
     hideTeamSection();
     return;
   }
-  if (state.currentStage !== 'work_task') {
+  if (state.currentStage !== 'placement') {
     hideTeamSection();
     return;
   }
@@ -4240,7 +4240,7 @@ python3 -m http.server 8001
 1. Open http://localhost:8001 in a browser
 2. Sign in as `browser@example.com`
 3. Apply to an IronVale role via Quick Apply
-4. Use admin page to force-advance the student to `work_task`
+4. Use admin page to force-advance the student to `placement`
 5. Verify the Team section appears in the sidebar
 6. Verify team members render with name + role + presence dot
 7. Click a team member with `presence_ok=true` — chat drawer should slide in

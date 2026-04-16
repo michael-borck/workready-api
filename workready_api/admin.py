@@ -270,8 +270,8 @@ def force_state(email: str, payload: dict) -> dict:
 
     Payload:
         {
-            "state": "APPLIED" | "HIRED:interview" | "HIRED:work_task" |
-                     "HIRED:lunchroom" | "HIRED:exit_interview" | "COMPLETED",
+            "state": "APPLIED" | "HIRED:interview" | "HIRED:placement" |
+                     "HIRED:mid_placement" | "HIRED:exit" | "COMPLETED",
             "company_slug": "ironvale-resources",
             "job_slug": "graduate-mining-engineer"
         }
@@ -299,9 +299,9 @@ def force_state(email: str, payload: dict) -> dict:
     stage_map = {
         "APPLIED": ("resume", "active"),
         "HIRED:interview": ("interview", "active"),
-        "HIRED:work_task": ("work_task", "active"),
-        "HIRED:lunchroom": ("lunchroom", "active"),
-        "HIRED:exit_interview": ("exit_interview", "active"),
+        "HIRED:placement": ("placement", "active"),
+        "HIRED:mid_placement": ("mid_placement", "active"),
+        "HIRED:exit": ("exit", "active"),
         "COMPLETED": ("completed", "completed"),
     }
     if state not in stage_map:
@@ -363,7 +363,7 @@ def force_outcome(application_id: int, payload: dict) -> dict:
         set_application_status(application_id, "rejected")
     elif outcome == "interview_pass":
         record_stage_result(application_id, "interview", "passed", score=85)
-        advance_stage(application_id, "work_task")
+        advance_stage(application_id, "placement")
         set_application_status(application_id, "active")
     elif outcome == "interview_fail":
         record_stage_result(application_id, "interview", "failed", score=35)

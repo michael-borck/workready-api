@@ -708,7 +708,7 @@ def _deliver_system_feedback(session: dict[str, Any], feedback: str) -> None:
     """Drop the supportive message in the student's work inbox.
 
     Sender is the simulation itself (a system sender), not a character —
-    bounces if replied to. Marked with related_stage='lunchroom' so the
+    bounces if replied to. Marked with related_stage='mid_placement' so the
     portal can style or filter it later.
     """
     application_id = session["application_id"]
@@ -734,5 +734,5 @@ def _deliver_system_feedback(session: dict[str, Any], feedback: str) -> None:
         body=feedback,
         inbox="work",
         application_id=application_id,
-        related_stage="lunchroom",
+        related_stage="mid_placement",
     )

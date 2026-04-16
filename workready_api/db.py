@@ -13,12 +13,12 @@ from typing import Any, Generator
 DB_PATH = Path(os.environ.get("WORKREADY_DB", "workready.db"))
 
 STAGES = [
-    "job_board",       # Stage 1: browsing/selecting a role
-    "resume",          # Stage 2: submitting a resume
-    "interview",       # Stage 3: attending the interview
-    "work_task",       # Stage 4: completing the work task
-    "lunchroom",       # Stage 5: the lunchroom moment
-    "exit_interview",  # Stage 6: the exit interview
+    "job_board",        # Stage 1: browsing/selecting a role
+    "resume",           # Stage 2: submitting a resume
+    "interview",        # Stage 3: attending the interview
+    "placement",        # Stage 4: completing the work task
+    "mid_placement",    # Stage 5: the mid-placement moment
+    "exit",             # Stage 6: the exit interview
 ]
 
 # Tables only — safe to run before migrations on legacy DBs because all
@@ -477,6 +477,36 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _migrate_stage_names(conn: sqlite3.Connection) -> None:
+    """One-shot: rewrite legacy stage values to the current naming.
+
+    Idempotent — running it twice is a no-op. Safe to call from init_db()
+    on fresh DBs (nothing to update) and dev DBs (sweeps stale values).
+    """
+    _STAGE_RENAMES = [
+        ("work_task", "placement"),
+        ("lunchroom", "mid_placement"),
+        ("exit_interview", "exit"),
+    ]
+    # Columns that hold stage identifiers as strings. Add to this list
+    # if new stage-bearing columns are added.
+    _STAGE_COLUMNS = [
+        ("applications", "current_stage"),
+        ("stage_results", "stage"),
+        ("messages", "related_stage"),
+    ]
+    for table, col in _STAGE_COLUMNS:
+        try:
+            for old, new in _STAGE_RENAMES:
+                conn.execute(
+                    f"UPDATE {table} SET {col} = ? WHERE {col} = ?",
+                    (new, old),
+                )
+        except sqlite3.OperationalError:
+            # Table or column doesn't exist on this DB yet — ignore.
+            pass
+
+
 @contextmanager
 def get_db() -> Generator[sqlite3.Connection, None, None]:
     """Get a database connection with row factory."""
@@ -500,6 +530,7 @@ def init_db() -> None:
     with get_db() as conn:
         conn.executescript(TABLES_SCHEMA)
         _migrate(conn)
+        _migrate_stage_names(conn)
         conn.executescript(INDEXES_SCHEMA)
 
 

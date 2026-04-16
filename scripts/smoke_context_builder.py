@@ -46,7 +46,7 @@ app_id = create_application(
 )
 
 # Seed prior stage results (record_stage_result overwrites current_stage,
-# so advance_stage must come after to ensure current_stage == "work_task")
+# so advance_stage must come after to ensure current_stage == "placement")
 record_stage_result(
     application_id=app_id, stage="resume", status="passed", score=72,
     feedback={"strengths": ["analytical"], "gaps": ["experience"],
@@ -57,7 +57,7 @@ record_stage_result(
     feedback={"strengths": ["clear"], "gaps": [],
               "suggestions": [], "tailoring": ""},
 )
-advance_stage(app_id, "work_task")
+advance_stage(app_id, "placement")
 
 # Seed a task
 now_iso = scheduling.to_iso(scheduling.now_utc())
@@ -75,7 +75,7 @@ create_message(
     student_id=s["id"], student_email="ctx@example.com",
     sender_name="Karen Whitfield", sender_role="Ops Lead at Context Test Co",
     subject="Welcome!", body="Hi Alex, welcome to the team. Let me know if you have questions.",
-    inbox="work", application_id=app_id, related_stage="work_task",
+    inbox="work", application_id=app_id, related_stage="placement",
 )
 create_outbound_message(
     student_id=s["id"], student_email="ctx@example.com",
@@ -95,7 +95,7 @@ ctx = asyncio.run(build_character_context(
 assert ctx.student_first_name == "Alex", f"got {ctx.student_first_name}"
 assert ctx.company_name == "Context Test Co"
 assert ctx.job_title == "Analyst"
-assert ctx.current_stage == "work_task"
+assert ctx.current_stage == "placement"
 assert ctx.character_name == "Karen Whitfield"
 assert ctx.resume_summary is not None
 assert ctx.resume_summary["score"] == 72
@@ -116,7 +116,7 @@ for i in range(40):
         student_id=s["id"], student_email="ctx@example.com",
         sender_name="Karen Whitfield", sender_role="Ops Lead",
         subject=f"Msg {i}", body="x" * 800,
-        inbox="work", application_id=app_id, related_stage="work_task",
+        inbox="work", application_id=app_id, related_stage="placement",
     )
 
 ctx2 = asyncio.run(build_character_context(

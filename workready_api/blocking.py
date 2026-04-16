@@ -43,7 +43,7 @@ def get_blocking_level_for_stage(stage: str) -> BlockingLevel:
     return {
         "resume": BLOCK_ON_RESUME_FAILURE,
         "interview": BLOCK_ON_INTERVIEW_FAILURE,
-        "work_task": BLOCK_ON_TASK_FAILURE,
+        "placement": BLOCK_ON_TASK_FAILURE,
     }.get(stage, "company")
 
 
