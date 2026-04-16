@@ -146,6 +146,20 @@ def _wrong_channel_system_body(
     )
 
 
+def _build_culture_hint(resolved, company: dict) -> str:
+    """One-liner culture descriptor for the classifier prompt.
+
+    Composes: character_role at company_name (business_hours description if available).
+    """
+    role = resolved.character_role or ""
+    company_name = company.get("company", resolved.company_slug or "")
+    bh_desc = (company.get("business_hours") or {}).get("description", "")
+    parts = [f"{role} at {company_name}" if role else company_name]
+    if bh_desc:
+        parts.append(f"({bh_desc})")
+    return " ".join(parts)
+
+
 # --- Models ---
 
 
@@ -326,7 +340,48 @@ async def compose_message(
             file_size=attachment_size,
         )
 
-    # Send auto-acknowledgment from the recipient
+    # --- Stage 7: comms monitor classifier hook ---
+    if resolved.kind == "character" and resolved.company_slug:
+        from workready_api.db import find_post_hire_application
+        from workready_api.comms_monitor import classify_outgoing
+        from workready_api.jobs import get_company as _get_company
+
+        app_data = find_post_hire_application(student["id"], resolved.company_slug)
+        if app_data:
+            company = _get_company(resolved.company_slug) or {}
+            classification = await classify_outgoing(
+                student_id=student["id"],
+                application_id=app_data["id"],
+                channel="email",
+                recipient=recipient_email,
+                subject=subject,
+                body=body,
+                student_stage=app_data.get("current_stage", ""),
+                recipient_role_hint=_build_culture_hint(resolved, company),
+            )
+
+            # Write classification onto the outbound message row
+            if classification.any_flag() or classification.status != "ok":
+                from workready_api.db import get_db as _get_db
+                with _get_db() as _conn:
+                    _conn.execute(
+                        "UPDATE messages SET review_flag = ? WHERE id = ?",
+                        (classification.to_json(), msg_id),
+                    )
+
+            if classification.any_flag():
+                await _schedule_bounceback(
+                    classification=classification,
+                    student=student,
+                    application_id=app_data["id"],
+                    app_data=app_data,
+                    recipient_email=recipient_email,
+                    subject=subject,
+                    inbox="work",
+                )
+                return SendResult(message_id=msg_id, status="delivered")
+
+    # Normal path — schedule the character/generic reply
     if resolved.kind == "character":
         background_tasks.add_task(
             _handle_character_reply, student, resolved, subject, body, None
@@ -445,6 +500,48 @@ async def reply_to_message(
             file_size=attachment_size,
         )
 
+    # --- Stage 7: comms monitor classifier hook ---
+    if resolved.kind == "character" and resolved.company_slug:
+        from workready_api.db import find_post_hire_application
+        from workready_api.comms_monitor import classify_outgoing
+        from workready_api.jobs import get_company as _get_company
+
+        app_data = find_post_hire_application(student["id"], resolved.company_slug)
+        if app_data:
+            company = _get_company(resolved.company_slug) or {}
+            classification = await classify_outgoing(
+                student_id=student["id"],
+                application_id=app_data["id"],
+                channel="email",
+                recipient=sender_email,
+                subject=subject,
+                body=body,
+                student_stage=app_data.get("current_stage", ""),
+                recipient_role_hint=_build_culture_hint(resolved, company),
+            )
+
+            # Write classification onto the outbound message row
+            if classification.any_flag() or classification.status != "ok":
+                from workready_api.db import get_db as _get_db
+                with _get_db() as _conn:
+                    _conn.execute(
+                        "UPDATE messages SET review_flag = ? WHERE id = ?",
+                        (classification.to_json(), msg_id),
+                    )
+
+            if classification.any_flag():
+                await _schedule_bounceback(
+                    classification=classification,
+                    student=student,
+                    application_id=app_data["id"],
+                    app_data=app_data,
+                    recipient_email=sender_email,
+                    subject=subject,
+                    inbox="work",
+                )
+                return SendResult(message_id=msg_id, status="delivered")
+
+    # Normal path — schedule the character/generic reply
     if resolved.kind == "character":
         background_tasks.add_task(
             _handle_character_reply, student, resolved, subject, body, thread_id
@@ -564,6 +661,100 @@ def get_email_directory() -> dict:
 
 
 # --- Internal helpers ---
+
+
+async def _schedule_bounceback(
+    *,
+    classification,
+    student: dict,
+    application_id: int,
+    app_data: dict | None,
+    recipient_email: str,
+    subject: str,
+    inbox: str,
+) -> None:
+    """Schedule a bounce-back message based on the classifier flag."""
+    from workready_api.db import create_message
+    from workready_api.availability import compute_reply_deliver_at
+    from workready_api.jobs import get_job
+
+    first_name = (student.get("name") or "").split()[0] if student.get("name") else "there"
+    company_slug = (app_data or {}).get("company_slug", "")
+    job = get_job(company_slug, (app_data or {}).get("job_slug", "")) or {}
+    company_name = job.get("company", company_slug)
+    mentor_name = job.get("reports_to", "Your mentor")
+
+    deliver_at = compute_reply_deliver_at(
+        company_slug,
+        student.get("last_login_at"),
+    )
+
+    # Priority: recipient > tone > channel
+    if classification.recipient_appropriateness == "wrong_audience":
+        body = _jenny_bounceback_body(
+            student_first_name=first_name,
+            original_subject=subject,
+            rationale=classification.rationale,
+            company_name=company_name,
+        )
+        create_message(
+            student_id=student["id"],
+            student_email=student.get("email", ""),
+            sender_name=JENNY_PROXY_SENDER_NAME,
+            sender_role=JENNY_PROXY_SENDER_ROLE,
+            sender_email=_jenny_email_for_company(company_slug),
+            subject=f"Re: {subject}",
+            body=body,
+            inbox=inbox,
+            application_id=application_id,
+            related_stage="placement",
+            deliver_at=deliver_at,
+        )
+        return
+
+    if classification.tone in ("sharp", "inappropriate"):
+        body = _mentor_tone_note_body(
+            student_first_name=first_name,
+            mentor_name=mentor_name,
+            original_subject=subject,
+            rationale=classification.rationale,
+            tone_flag=classification.tone,
+        )
+        create_message(
+            student_id=student["id"],
+            student_email=student.get("email", ""),
+            sender_name=mentor_name,
+            sender_role=f"Your mentor at {company_name}",
+            sender_email=f"{mentor_name.lower().replace(' ', '.')}@"
+                         f"{company_slug.replace('-', '')}.com.au",
+            subject="Quick note",
+            body=body,
+            inbox=inbox,
+            application_id=application_id,
+            related_stage="placement",
+            deliver_at=deliver_at,
+        )
+        return
+
+    if classification.channel_appropriateness == "wrong_channel":
+        body = _wrong_channel_system_body(
+            student_first_name=first_name,
+            original_subject=subject,
+        )
+        create_message(
+            student_id=student["id"],
+            student_email=student.get("email", ""),
+            sender_name="WorkReady",
+            sender_role="Simulation guide",
+            sender_email="noreply@workready.eduserver.au",
+            subject="Heads up — channel check",
+            body=body,
+            inbox="personal",
+            application_id=application_id,
+            related_stage="placement",
+            deliver_at=deliver_at,
+        )
+        return
 
 
 def _get_character_persona(company_slug: str, character_name: str) -> str:

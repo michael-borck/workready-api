@@ -822,6 +822,28 @@ def get_application(application_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+POST_HIRE_STAGES = {"placement", "mid_placement", "exit"}
+
+
+def find_post_hire_application(
+    student_id: int, company_slug: str,
+) -> dict[str, Any] | None:
+    """Find the student's post-hire application at a specific company.
+
+    Returns the most recent application where current_stage is in
+    POST_HIRE_STAGES, or None if no matching application exists.
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT * FROM applications
+               WHERE student_id = ? AND company_slug = ?
+                 AND current_stage IN (?, ?, ?)
+               ORDER BY created_at DESC LIMIT 1""",
+            (student_id, company_slug, *POST_HIRE_STAGES),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def get_student_applications(student_id: int) -> list[dict[str, Any]]:
     """Get all applications for a student, newest first."""
     with get_db() as conn:
