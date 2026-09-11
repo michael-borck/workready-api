@@ -63,9 +63,11 @@ generators, deployment, and external tools.
   → API loads via `load_jobs()` in `jobs.py`. Two locations exist in dev
   (`loco-ensyo/<slug>/jobs.json` and `workready-api/jobs/<slug>.json`) — keep
   both in sync when seeding manually.
-- **No file uploads persisted long-term** for resumes — extracted text is
-  stored on the application row, the PDF itself is processed in memory.
-  (Mail attachments do persist via `mail.py`.)
+- **No resume persistence.** Extracted resume text is processed in memory
+  only (contact details redacted at import, `pdf.py`), passed to the
+  configured assessor, then discarded — nothing about the resume is
+  written to the DB. The email-apply path does persist the attachment
+  via `mail.py` (it's part of the student's fictional inbox).
 
 ## A student's full journey — what touches what
 

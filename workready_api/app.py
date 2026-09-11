@@ -58,7 +58,7 @@ from workready_api.db import (
     mark_task_submitted,
     record_stage_result,
     set_application_status,
-    set_display_name,
+    set_persona,
     update_booking_status,
     update_calendar_event_status,
 )
@@ -106,6 +106,8 @@ from workready_api.models import (
     InterviewStartRequest,
     Message,
     PostingList,
+    PersonaRequest,
+    PersonaResponse,
     PublicPosting,
     SlotOption,
     SlotOptions,
@@ -134,7 +136,7 @@ from workready_api.models import (
     ChatMessageModel,
     ChatThreadResponse,
 )
-from workready_api.pdf import extract_text
+from workready_api.pdf import extract_text, redact_contact_details
 
 SITE_SLUGS = [
     "nexuspoint-systems",
@@ -421,9 +423,11 @@ async def submit_resume(
             detail="Either posting_id or (company_slug, job_slug) is required",
         )
 
-    # Extract text from uploaded PDF
+    # Extract text from uploaded PDF — and strip contact details. Students
+    # may upload their real resume; the simulation needs the professional
+    # content, never anyone's real email/phone/address.
     pdf_bytes = await resume.read()
-    resume_text = extract_text(pdf_bytes)
+    resume_text = redact_contact_details(extract_text(pdf_bytes))
 
     # Look up the job description for comparison
     job_description = get_job_description(company_slug, job_slug)
@@ -446,7 +450,7 @@ async def submit_resume(
                    "from your unit coordinator.",
         )
     if applicant_name.strip():
-        student = set_display_name(student["id"], applicant_name) or student
+        student = set_persona(student["id"], applicant_name) or student
     first_name = (
         (student.get("display_name") or "").split()[0] or "there"
     ) if student.get("display_name") else "there"
@@ -765,6 +769,33 @@ def get_student_state(code: str) -> StudentState:
         unread_work=unread_work,
         blocked_companies=blocked["companies"],
         blocked_jobs=[BlockedJob(**j) for j in blocked["jobs"]],
+    )
+
+
+@app.post("/api/v1/student/{code}/profile", response_model=PersonaResponse)
+def set_student_persona(code: str, req: PersonaRequest) -> PersonaResponse:
+    """Set the student's persona — their candidate-profile name.
+
+    The name is self-declared simulation flavour (a stage name, never
+    verified or required): students may use any name they like, and the
+    code->person mapping still lives only in the lecturer's records.
+    The in-sim mailbox is derived from it so the handle reads naturally
+    ('jane.doe@…' rather than 'wr4xkq9m2t@…') while staying unlinkable.
+    """
+    student = get_or_create_student(code)
+    if not student:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown or inactive access code — please check the code "
+                   "from your unit coordinator.",
+        )
+    name = (req.display_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Display name cannot be empty")
+    updated = set_persona(student["id"], name)
+    return PersonaResponse(
+        display_name=updated.get("display_name"),
+        handle=updated.get("handle", ""),
     )
 
 

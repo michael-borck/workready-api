@@ -646,6 +646,62 @@ def set_display_name(student_id: int, name: str | None) -> dict[str, Any] | None
     return get_student_by_id(student_id)
 
 
+def _slugify_name_local(name: str) -> str:
+    """'Jane Doe' -> 'jane.doe' — an email-friendly local part."""
+    parts = re.findall(r"[A-Za-z]+", name.lower())
+    return ".".join(p for p in parts if p)
+
+
+def derive_handle_from_name(name: str, student_id: int) -> str:
+    """Personal handle derived from the student's persona name.
+
+    'Jane Doe' -> 'jane.doe@student.workready.eduserver.au', with a
+    numeric suffix added on collision ('jane.doe27@…'). Uniqueness is
+    scoped to other students; the persona name is self-declared fiction,
+    so duplicate human names are fine — only the mailbox must be unique.
+    """
+    local = _slugify_name_local(name) or f"candidate{student_id}"
+    base = local[:40]
+    candidate = f"{base}@{HANDLE_DOMAIN}"
+    suffix = 2
+    with get_db() as conn:
+        while conn.execute(
+            "SELECT 1 FROM students WHERE handle = ? AND id != ?",
+            (candidate, student_id),
+        ).fetchone():
+            candidate = f"{base}{suffix}@{HANDLE_DOMAIN}"
+            suffix += 1
+    return candidate
+
+
+def set_persona(student_id: int, name: str | None) -> dict[str, Any] | None:
+    """Adopt the student's persona: display name + matching personal handle.
+
+    The name is self-declared simulation flavour (a stage name, never
+    verified). The handle is derived from it so the student's in-sim
+    mailbox reads naturally ('jane.doe@…' rather than 'wr4xkq9m2t@…')
+    while staying unlinkable to any real person. Re-saving with a new
+    name re-derives the handle; previously sent mail keeps the address
+    it was sent with, exactly like real email history.
+    """
+    cleaned = (name or "").strip() or None
+    if cleaned and len(cleaned) > 60:
+        cleaned = cleaned[:60]
+    handle = derive_handle_from_name(cleaned, student_id) if cleaned else None
+    with get_db() as conn:
+        if cleaned and handle:
+            conn.execute(
+                "UPDATE students SET display_name = ?, handle = ? WHERE id = ?",
+                (cleaned, handle, student_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE students SET display_name = ? WHERE id = ?",
+                (cleaned, student_id),
+            )
+    return get_student_by_id(student_id)
+
+
 def create_application(
     student_id: int,
     company_slug: str,

@@ -206,6 +206,19 @@ class BookingRequest(BaseModel):
     scheduled_at: str  # UTC ISO
 
 
+class PersonaRequest(BaseModel):
+    """Set the student's self-declared persona (candidate profile name)."""
+
+    display_name: str
+
+
+class PersonaResponse(BaseModel):
+    """The adopted persona: display name and derived in-sim mailbox."""
+
+    display_name: str | None = None
+    handle: str
+
+
 class StudentState(BaseModel):
     """High-level state for the portal — what the student should see."""
 

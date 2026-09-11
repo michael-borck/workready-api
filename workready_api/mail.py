@@ -1058,10 +1058,12 @@ async def _handle_careers_application(
     company_slug, job_slug = job_key
     job_title = job.get("title", job_slug)
 
-    # Extract resume text
+    # Extract resume text — redacted, same as the web apply path
     try:
+        from workready_api.pdf import redact_contact_details
+
         resume_path = Path(attachment_path)
-        resume_text = extract_text(resume_path.read_bytes())
+        resume_text = redact_contact_details(extract_text(resume_path.read_bytes()))
     except Exception as exc:
         log.warning("Failed to extract resume text: %s", exc)
         resume_text = ""
