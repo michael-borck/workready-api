@@ -398,7 +398,9 @@ All env-driven, all defined in `workready_api/scheduling.py`. Headline groups:
   lifecycle, journey report, practice tools. Feature-complete as of
   April 2026.
 - **Phase 2** — productionise: real email delivery, passwordless magic-code
-  auth, rate limiting, admin bulk cohort management.
+  auth, rate limiting, admin bulk cohort management, and a config console —
+  an independent admin UI that edits cohort pacing (env-equivalent knobs) and
+  per-company data files, then republishes whatever the config touches.
 - **Phase 3** — scale: inbound email, Telegram channel, per-student
   notification preferences, per-cohort config, light LMS integration.
 - **Phase 4** — institutional: MS Teams via Graph API, university SSO, full
