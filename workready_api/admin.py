@@ -133,6 +133,58 @@ def list_students() -> dict:
     return {"students": students, "total": len(students)}
 
 
+@router.get("/funnel")
+def cohort_funnel() -> dict:
+    """Cohort funnel — where every student sits in the internship arc.
+
+    One row per application bucketed by live stage, plus aggregate counters.
+    Built for the lecturer's cohort view: spot who's stuck where at a glance.
+    """
+    stages = ["resume", "interview", "placement", "mid_placement", "exit"]
+    funnel = [{"key": s, "label": stage_label(s), "count": 0} for s in stages]
+    completed = rejected = hired = 0
+    with get_db() as conn:
+        students_total = conn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+        codes_total = conn.execute("SELECT COUNT(*) FROM codes").fetchone()[0]
+        codes_redeemed = conn.execute(
+            "SELECT COUNT(*) FROM codes WHERE redeemed_at IS NOT NULL"
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT current_stage, status, COUNT(*) AS n FROM applications "
+            "GROUP BY current_stage, status"
+        ).fetchall()
+        for r in rows:
+            stage, status, n = r["current_stage"], r["status"], r["n"]
+            if status == "rejected":
+                rejected += n
+            elif status == "completed" or stage == "completed":
+                completed += n
+            elif status == "hired" or stage in stages:
+                hired += n
+                for f in funnel:
+                    if f["key"] == stage:
+                        f["count"] += n
+    return {
+        "students": students_total,
+        "codes": codes_total,
+        "codes_redeemed": codes_redeemed,
+        "funnel": funnel,
+        "hired": hired,
+        "completed": completed,
+        "rejected": rejected,
+    }
+
+
+def stage_label(stage: str) -> str:
+    return {
+        "resume": "Applied (under review)",
+        "interview": "Interview stage",
+        "placement": "On placement",
+        "mid_placement": "Mid-placement",
+        "exit": "Exit interview",
+    }.get(stage, stage.replace("_", " ").title())
+
+
 @router.get("/applications/{application_id}/journey-report")
 def get_journey_report(application_id: int) -> dict:
     """Lecturer-friendly journey report for a single application.

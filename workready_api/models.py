@@ -142,11 +142,13 @@ class InterviewSession(BaseModel):
 
 class InterviewStartRequest(BaseModel):
     application_id: int
+    code: str = ""
 
 
 class InterviewMessageRequest(BaseModel):
     session_id: int
     message: str
+    code: str = ""
 
 
 class InterviewMessageReply(BaseModel):
@@ -444,6 +446,7 @@ class LunchroomChatState(BaseModel):
 
 
 class LunchroomPostRequest(BaseModel):
+    code: str = ""
     """Request body for a student posting to the chat."""
 
     content: str
@@ -489,6 +492,7 @@ class ChatSendRequest(BaseModel):
     application_id: int
     character_slug: str
     content: str
+    code: str = ""
 
 
 class ChatMessageModel(BaseModel):

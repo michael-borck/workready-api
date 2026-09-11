@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import time
+from collections import deque
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from workready_api.assessor import assess
@@ -358,6 +360,68 @@ def health() -> dict:
     return {"status": "ok", "version": "0.2.0"}
 
 
+# --- Ownership guards --------------------------------------------------------
+# Student-facing, ID-scoped routes must prove the caller owns the object.
+# Identity = access code (fail-closed); mismatches return 404 (not 403) so
+# IDs stay unenumerable.
+
+def _require_code(code: str | None) -> dict:
+    """Resolve the caller's student from an access code — fail closed."""
+    student = get_active_student_by_code(code or "")
+    if not student:
+        raise HTTPException(status_code=401, detail="Unknown or inactive access code")
+    return student
+
+
+def _owned_application_or_404(application_id: int, code: str | None) -> dict:
+    """404 unless the application exists AND belongs to this access code."""
+    student = _require_code(code)
+    app_data = get_application(application_id)
+    if not app_data or app_data["student_id"] != student["id"]:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return app_data
+
+
+def _owned_interview_session_or_404(session_id: int, code: str | None) -> dict:
+    """404 unless the interview-style session belongs to this access code."""
+    sess = get_interview_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _owned_application_or_404(sess["application_id"], code)
+
+
+def _owned_task_or_404(task_id: int, code: str | None) -> dict:
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return _owned_application_or_404(task["application_id"], code)
+
+
+def _owned_lunchroom_session_or_404(session_id: int, code: str | None) -> dict:
+    sess = get_lunchroom_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Lunchroom session not found")
+    return _owned_application_or_404(sess["application_id"], code)
+
+
+# --- Code-entry rate limiting (anti-enumeration) ------------------------------
+_RATE: dict = {}
+_RATE_LIMIT_FAILURES = 10
+_RATE_LIMIT_WINDOW_SECONDS = 60.0
+
+
+def _rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    q = _RATE.setdefault(ip, deque())
+    while q and now - q[0] > _RATE_LIMIT_WINDOW_SECONDS:
+        q.popleft()
+    return len(q) >= _RATE_LIMIT_FAILURES
+
+
+def _record_code_failure(ip: str) -> None:
+    _RATE.setdefault(ip, deque()).append(time.monotonic())
+
+
 # --- Public job board (for seek.jobs) ---
 
 
@@ -385,6 +449,7 @@ def list_postings(code: str | None = None) -> PostingList:
 
 @app.post("/api/v1/resume", response_model=AssessmentResult)
 async def submit_resume(
+    submit_resume_request: Request,
     company_slug: str = Form(""),
     job_slug: str = Form(""),
     job_title: str = Form(...),
@@ -444,8 +509,11 @@ async def submit_resume(
     # application, and stage result
     student = get_or_create_student(applicant_code)
     if not student:
+        ip = submit_resume_request.client.host if submit_resume_request.client else "unknown"
+        _record_code_failure(ip)
+        status = 429 if _rate_limited(ip) else 400
         raise HTTPException(
-            status_code=400,
+            status_code=status,
             detail="Unknown or inactive access code — please check the code "
                    "from your unit coordinator.",
         )
@@ -691,7 +759,7 @@ def _send_welcome_email(handle: str, first_name: str) -> None:
 
 
 @app.get("/api/v1/student/{code}/state", response_model=StudentState)
-def get_student_state(code: str) -> StudentState:
+def get_student_state(code: str, request: Request) -> StudentState:
     """Get the high-level state of a student for the portal.
 
     Identifies the student by access code. On first redemption, creates
@@ -702,10 +770,14 @@ def get_student_state(code: str) -> StudentState:
     """
     student = get_or_create_student(code)
 
-    # Fail closed on anything that isn't a live code
+    # Fail closed on anything that isn't a live code — and throttle
+    # enumeration attempts (10 bad codes/minute/IP).
     if not student:
+        ip = request.client.host if request.client else "unknown"
+        _record_code_failure(ip)
+        status = 429 if _rate_limited(ip) else 400
         raise HTTPException(
-            status_code=400,
+            status_code=status,
             detail="Unknown or inactive access code — please check the code "
                    "from your unit coordinator.",
         )
@@ -772,7 +844,7 @@ def get_student_state(code: str) -> StudentState:
 
 
 @app.post("/api/v1/student/{code}/profile", response_model=PersonaResponse)
-def set_student_persona(code: str, req: PersonaRequest) -> PersonaResponse:
+def set_student_persona(code: str, request: Request, req: PersonaRequest) -> PersonaResponse:
     """Set the student's persona — their candidate-profile name.
 
     The name is self-declared simulation flavour (a stage name, never
@@ -799,11 +871,14 @@ def set_student_persona(code: str, req: PersonaRequest) -> PersonaResponse:
 
 
 @app.get("/api/v1/inbox/{code}", response_model=Inbox)
-def get_inbox_endpoint(code: str, inbox: str = "personal") -> Inbox:
+def get_inbox_endpoint(code: str, request: Request, inbox: str = "personal") -> Inbox:
     """Get a student's inbox messages."""
     student = get_active_student_by_code(code)
     if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
+        ip = request.client.host if request.client else "unknown"
+        _record_code_failure(ip)
+        status = 429 if _rate_limited(ip) else 404
+        raise HTTPException(status_code=status, detail="Student not found")
     messages = get_inbox(student["id"], inbox)
     return Inbox(
         inbox=inbox,
@@ -826,8 +901,9 @@ def mark_read(message_id: int) -> dict:
 
 
 @app.get("/api/v1/application/{application_id}", response_model=ApplicationDetail)
-def get_application_detail(application_id: int) -> ApplicationDetail:
+def get_application_detail(application_id: int, code: str = Query("")) -> ApplicationDetail:
     """Get full detail of an application including all stage results."""
+    _owned_application_or_404(application_id, code)
     app_data = get_application(application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -846,8 +922,9 @@ def get_application_detail(application_id: int) -> ApplicationDetail:
 
 
 @app.get("/api/v1/team/{application_id}", response_model=TeamDirectoryResponse)
-def get_team(application_id: int) -> TeamDirectoryResponse:
+def get_team(application_id: int, code: str = Query("")) -> TeamDirectoryResponse:
     """Return the team directory for a hired student's application."""
+    _owned_application_or_404(application_id, code)
     app_data = get_application(application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -860,7 +937,8 @@ def get_team(application_id: int) -> TeamDirectoryResponse:
 
 
 @app.post("/api/v1/application/{application_id}/resign")
-def resign_application(application_id: int) -> dict:
+def resign_application(application_id: int, code: str = Query("")) -> dict:
+    _owned_application_or_404(application_id, code)
     """Resign from a placement mid-stream.
 
     Sets the application status to 'resigned' and drops a confirmation
@@ -1076,7 +1154,8 @@ def get_practice_script(company_slug: str, job_slug: str) -> Response:
 
 
 @app.get("/api/v1/practice/interview/{application_id}/talk-buddy.json")
-def export_interview_talk_buddy(application_id: int) -> Response:
+def export_interview_talk_buddy(application_id: int, code: str = Query("")) -> Response:
+    _owned_application_or_404(application_id, code)
     """Download a Talk Buddy skill_package for the hiring interview.
 
     Reuses the live interview's persona + resume context so the practice
@@ -1103,7 +1182,8 @@ def export_interview_talk_buddy(application_id: int) -> Response:
 
 
 @app.get("/api/v1/practice/lunchroom/{session_id}/talk-buddy.json")
-def export_lunchroom_talk_buddy(session_id: int) -> Response:
+def export_lunchroom_talk_buddy(session_id: int, code: str = Query("")) -> Response:
+    _owned_lunchroom_session_or_404(session_id, code)
     """Download a Talk Buddy skill_package for a lunchroom session.
 
     Bundles one scenario per AI participant — the student can practise
@@ -1395,7 +1475,8 @@ def _check_for_missed_booking(application_id: int) -> bool:
 
 
 @app.get("/api/v1/interview/{application_id}/booking", response_model=BookingState)
-def get_booking(application_id: int) -> BookingState:
+def get_booking(application_id: int, code: str = Query("")) -> BookingState:
+    _owned_application_or_404(application_id, code)
     """Get the current booking state for an application."""
     app_data = get_application(application_id)
     if not app_data:
@@ -1456,7 +1537,8 @@ def get_booking_slots(
 
 
 @app.post("/api/v1/interview/{application_id}/book", response_model=BookingState)
-def book_interview(application_id: int, req: BookingRequest) -> BookingState:
+def book_interview(application_id: int, req: BookingRequest, code: str = Query("")) -> BookingState:
+    _owned_application_or_404(application_id, code)
     """Book a specific interview slot."""
     app_data = get_application(application_id)
     if not app_data:
@@ -1732,7 +1814,8 @@ def _build_ics(
 
 
 @app.get("/api/v1/interview/{application_id}/booking.ics")
-def get_booking_ics(application_id: int) -> Response:
+def get_booking_ics(application_id: int, code: str = Query("")) -> Response:
+    _owned_application_or_404(application_id, code)
     """Return the .ics calendar invite for the current pending booking.
 
     Students download this and double-click to add the interview to their
@@ -1787,7 +1870,8 @@ def get_booking_ics(application_id: int) -> Response:
 
 
 @app.post("/api/v1/interview/{application_id}/cancel-booking", response_model=BookingState)
-def cancel_booking(application_id: int) -> BookingState:
+def cancel_booking(application_id: int, code: str = Query("")) -> BookingState:
+    _owned_application_or_404(application_id, code)
     """Cancel the current pending booking (so the student can rebook).
 
     Counts as a reschedule. If the student is at the hard reschedule
@@ -1854,6 +1938,7 @@ def _extract_manager_role(manager_name: str, job: dict) -> str:
 
 @app.post("/api/v1/interview/start", response_model=InterviewSession)
 async def interview_start(req: InterviewStartRequest) -> InterviewSession:
+    _owned_application_or_404(req.application_id, req.code)
     """Start an interview session for an application that's in the interview stage."""
     app_data = get_application(req.application_id)
     if not app_data:
@@ -1961,6 +2046,7 @@ async def interview_start(req: InterviewStartRequest) -> InterviewSession:
 
 @app.post("/api/v1/interview/message", response_model=InterviewMessageReply)
 async def interview_message(req: InterviewMessageRequest) -> InterviewMessageReply:
+    _owned_interview_session_or_404(req.session_id, req.code)
     """Send a student message and get the manager's reply."""
     session = get_interview_session(req.session_id)
     if not session:
@@ -2015,7 +2101,8 @@ async def interview_message(req: InterviewMessageRequest) -> InterviewMessageRep
 
 
 @app.post("/api/v1/interview/{session_id}/end", response_model=InterviewSession)
-async def interview_end(session_id: int) -> InterviewSession:
+async def interview_end(session_id: int, code: str = Query("")) -> InterviewSession:
+    _owned_interview_session_or_404(session_id, code)
     """End the interview, run the assessment, and update the application."""
     session = get_interview_session(session_id)
     if not session:
@@ -2177,6 +2264,7 @@ def _exit_session_to_model(session: dict) -> InterviewSession:
 
 @app.post("/api/v1/exit/start", response_model=InterviewSession)
 async def exit_interview_start(req: InterviewStartRequest) -> InterviewSession:
+    _owned_application_or_404(req.application_id, req.code)
     """Start (or resume) the exit interview for a completed-tasks application.
 
     Idempotent: if there's already an active or completed exit session
@@ -2220,6 +2308,7 @@ async def exit_interview_start(req: InterviewStartRequest) -> InterviewSession:
 async def exit_interview_message(
     req: InterviewMessageRequest,
 ) -> InterviewMessageReply:
+    _owned_interview_session_or_404(req.session_id, req.code)
     """Send a student turn to the exit interviewer and get Sam's reply."""
     session = get_interview_session(req.session_id)
     if not session or session.get("kind") != "exit":
@@ -2252,7 +2341,8 @@ async def exit_interview_message(
 
 
 @app.post("/api/v1/exit/{session_id}/end", response_model=InterviewSession)
-async def exit_interview_end(session_id: int) -> InterviewSession:
+async def exit_interview_end(session_id: int, code: str = Query("")) -> InterviewSession:
+    _owned_interview_session_or_404(session_id, code)
     """End the exit interview, run the assessment, and complete the placement.
 
     Marks the application as 'completed' and the student state as
@@ -2375,6 +2465,7 @@ def _perf_review_session_to_model(session: dict) -> InterviewSession:
 
 @app.post("/api/v1/perf-review/start", response_model=InterviewSession)
 async def perf_review_start(req: InterviewStartRequest) -> InterviewSession:
+    _owned_application_or_404(req.application_id, req.code)
     """Start (or resume) the mid-placement performance review.
 
     Idempotent — returns existing active or completed session if one
@@ -2435,6 +2526,7 @@ async def perf_review_start(req: InterviewStartRequest) -> InterviewSession:
 async def perf_review_message(
     req: InterviewMessageRequest,
 ) -> InterviewMessageReply:
+    _owned_interview_session_or_404(req.session_id, req.code)
     """Send a student turn to the mentor and get their reply."""
     session = get_interview_session(req.session_id)
     if not session or session.get("kind") != "performance_review":
@@ -2471,7 +2563,8 @@ async def perf_review_message(
 
 
 @app.post("/api/v1/perf-review/{session_id}/end", response_model=InterviewSession)
-async def perf_review_end(session_id: int) -> InterviewSession:
+async def perf_review_end(session_id: int, code: str = Query("")) -> InterviewSession:
+    _owned_interview_session_or_404(session_id, code)
     """End the coaching conversation, run the assessment, persist the notes.
 
     No state transition — the student is still on placement and still
@@ -2562,8 +2655,9 @@ def _task_to_summary(task: dict) -> TaskSummary:
 
 
 @app.get("/api/v1/tasks/application/{application_id}", response_model=TaskList)
-def list_tasks(application_id: int) -> TaskList:
+def list_tasks(application_id: int, code: str = Query("")) -> TaskList:
     """List all visible tasks for an application (hides gated tasks)."""
+    _owned_application_or_404(application_id, code)
     app_data = get_application(application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -2609,8 +2703,9 @@ def _task_to_detail(task: dict) -> TaskDetail:
 
 
 @app.get("/api/v1/tasks/{task_id}", response_model=TaskDetail)
-def get_task_detail(task_id: int) -> TaskDetail:
+def get_task_detail(task_id: int, code: str = Query("")) -> TaskDetail:
     """Get full detail for a single task (description + latest submission)."""
+    _owned_task_or_404(task_id, code)
     task = get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -2626,9 +2721,11 @@ def get_task_detail(task_id: int) -> TaskDetail:
 @app.post("/api/v1/tasks/{task_id}/submit", response_model=TaskSubmitResult)
 async def submit_task(
     task_id: int,
+    code: str = Form(""),
     body: str = Form(...),
     attachment: UploadFile | None = File(None),
 ) -> TaskSubmitResult:
+    _owned_task_or_404(task_id, code)
     """Submit a work task. Runs the mentor reviewer, stores the outcome
     lazily-gated behind TASK_FEEDBACK_DELAY, and reveals the next task
     after TASK_NEXT_TASK_DELAY.
@@ -2938,7 +3035,7 @@ def accept_calendar_event(event_id: int) -> CalendarEvent:
     "/api/v1/calendar/event/{event_id}/decline",
     response_model=CalendarEvent,
 )
-def decline_calendar_event(event_id: int) -> CalendarEvent:
+def decline_calendar_event(event_id: int, code: str = Query("")) -> CalendarEvent:
     """Decline an invitation-style calendar event."""
     event = get_calendar_event(event_id)
     if not event:
@@ -2993,8 +3090,9 @@ def _lunchroom_session_to_model(row: dict) -> LunchroomSession:
     "/api/v1/lunchroom/application/{application_id}",
     response_model=LunchroomSessionList,
 )
-def list_lunchroom_sessions(application_id: int) -> LunchroomSessionList:
+def list_lunchroom_sessions(application_id: int, code: str = Query("")) -> LunchroomSessionList:
     """List all lunchroom sessions (invites + accepted + completed) for an app."""
+    _owned_application_or_404(application_id, code)
     app_data = get_application(application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
@@ -3031,6 +3129,7 @@ def pick_lunchroom_slot_route(
     the session to 'accepted', and materialises a calendar event so it
     shows up in the calendar view.
     """
+    _owned_lunchroom_session_or_404(session_id, req.code)
     session = get_lunchroom_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -3054,8 +3153,9 @@ def pick_lunchroom_slot_route(
     "/api/v1/lunchroom/invitation/{session_id}/decline",
     response_model=LunchroomSession,
 )
-def decline_lunchroom_invitation_route(session_id: int) -> LunchroomSession:
+def decline_lunchroom_invitation_route(session_id: int, code: str = Query("")) -> LunchroomSession:
     """Student declines the invitation. May trigger a mentor check-in."""
+    _owned_lunchroom_session_or_404(session_id, code)
     session = get_lunchroom_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -3113,7 +3213,8 @@ def _chat_entry_allowed(session: dict) -> bool:
     "/api/v1/lunchroom/session/{session_id}/activate",
     response_model=LunchroomChatState,
 )
-async def activate_lunchroom_chat(session_id: int) -> LunchroomChatState:
+async def activate_lunchroom_chat(session_id: int, code: str = Query("")) -> LunchroomChatState:
+    _owned_lunchroom_session_or_404(session_id, code)
     """Activate the lunchroom chat — plans the arc, transitions to 'active'.
 
     Idempotent: re-calling on an already-active session is a no-op that
@@ -3150,8 +3251,9 @@ async def activate_lunchroom_chat(session_id: int) -> LunchroomChatState:
     "/api/v1/lunchroom/session/{session_id}/chat",
     response_model=LunchroomChatState,
 )
-async def poll_lunchroom_chat(session_id: int) -> LunchroomChatState:
+async def poll_lunchroom_chat(session_id: int, code: str = Query("")) -> LunchroomChatState:
     """Poll endpoint: render any due beats, return current visible posts."""
+    _owned_lunchroom_session_or_404(session_id, code)
     session = get_lunchroom_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -3173,6 +3275,7 @@ async def post_lunchroom_message(
     session_id: int, req: LunchroomPostRequest,
 ) -> LunchroomChatState:
     """Student posts a message to the chat."""
+    _owned_lunchroom_session_or_404(session_id, req.code)
     session = get_lunchroom_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -3258,6 +3361,7 @@ Respond naturally to what the student just said. Stay in character.
 
 @app.post("/api/v1/chat/send")
 async def chat_send(req: ChatSendRequest) -> dict:
+    _owned_application_or_404(req.application_id, req.code)
     """Send a chat message from student to a team character."""
     from workready_api.comms_monitor import classify_outgoing
     from workready_api.context_builder import build_character_context
@@ -3367,8 +3471,9 @@ async def chat_send(req: ChatSendRequest) -> dict:
 
 
 @app.get("/api/v1/chat/thread/{application_id}/{character_slug}", response_model=ChatThreadResponse)
-def chat_thread(application_id: int, character_slug: str) -> ChatThreadResponse:
+def chat_thread(application_id: int, character_slug: str, code: str = Query("")) -> ChatThreadResponse:
     """Return the delivered chat messages between a student and a character."""
+    _owned_application_or_404(application_id, code)
     app_data = get_application(application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")

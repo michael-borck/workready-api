@@ -382,8 +382,11 @@ All env-driven, all defined in `workready_api/scheduling.py`. Headline groups:
 
 - No background workers / cron / queue. Every "later" feature is lazy-gated.
 - No session-based auth — every endpoint takes the access code (or
-  application-scoped id) as a param. No password, no PII stored; see
-  `docs/AUTH-MIGRATION.md` for the JWT/session follow-up plan.
+  application-scoped id) as a param. No password, no PII stored. All
+  application/session-scoped routes enforce **ownership guards** (404 on
+  cross-student access) and code-entry endpoints are **rate-limited**
+  (10 bad codes/min/IP → 429). Bearer-token sessions remain the planned
+  follow-up; see `docs/AUTH-MIGRATION.md`.
 - No multi-student team tasks. Each student goes through alone.
 - No video/voice — every conversation is typed.
 - No aggregate grade in the journey report — by design. Lecturers grade.
