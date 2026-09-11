@@ -655,7 +655,7 @@ def _send_welcome_email(handle: str, first_name: str) -> None:
         event="welcome",
         content=NotifyContent(
             sender_name="WorkReady Team",
-            sender_role="Curtin University",
+            sender_role="WorkReady Program",
             subject="Welcome to WorkReady — Your Internship Journey Starts Here",
             body=(
                 f"Hi {first_name or 'there'},\n\n"
@@ -684,8 +684,7 @@ def _send_welcome_email(handle: str, first_name: str) -> None:
                 f"job you apply for. Feedback might sting. That's the point — "
                 f"you'll be much better prepared when it counts.\n\n"
                 f"Good luck.\n\n"
-                f"— The WorkReady Team\n"
-                f"Curtin University"
+                f"— The WorkReady Team"
             ),
         ),
     )

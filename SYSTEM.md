@@ -8,8 +8,8 @@
 
 ## What WorkReady is
 
-WorkReady is an AI-powered internship simulation built for Curtin
-University's School of Marketing and Management. A student signs in with an
+WorkReady is an AI-powered internship simulation built as a
+university teaching tool. A student signs in with an
 email, browses a Seek-style job board of fictional companies, applies with a
 resume + cover letter, and is taken through the full arc of an internship —
 resume review → hiring interview → work tasks with mentor feedback →
@@ -401,7 +401,7 @@ All env-driven, all defined in `workready_api/scheduling.py`. Headline groups:
   auth, rate limiting, admin bulk cohort management.
 - **Phase 3** — scale: inbound email, Telegram channel, per-student
   notification preferences, per-cohort config, light LMS integration.
-- **Phase 4** — institutional: MS Teams via Graph API, Curtin SSO, full
+- **Phase 4** — institutional: MS Teams via Graph API, university SSO, full
   gradebook pass-back, proper lecturer dashboard.
 
 24-month runway across phases 2–4. The educational pipeline is sequenced
