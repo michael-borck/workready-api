@@ -15,7 +15,7 @@ os.environ.setdefault("LLM_PROVIDER", "stub")
 pathlib.Path(os.environ["WORKREADY_DB"]).unlink(missing_ok=True)
 
 from workready_api.db import (
-    init_db, get_or_create_student, create_application,
+    init_db, get_or_create_student, generate_codes, create_application,
 )
 from workready_api.jobs import _COMPANY_CACHE, _JOB_CACHE
 
@@ -55,15 +55,14 @@ _JOB_CACHE[("test-default", "intern")] = {
 }
 
 # --- Create synthetic applications ---
-s = get_or_create_student("t@example.com", "Tester")
+_code = generate_codes(1)[0]
+s = get_or_create_student(_code)
 
 app_explicit = create_application(
-    student_id=s["id"], student_email="t@example.com",
-    company_slug="test-explicit", job_slug="junior", job_title="Junior",
+    student_id=s["id"], company_slug="test-explicit", job_slug="junior", job_title="Junior",
 )
 app_default = create_application(
-    student_id=s["id"], student_email="t@example.com",
-    company_slug="test-default", job_slug="intern", job_title="Intern",
+    student_id=s["id"], company_slug="test-default", job_slug="intern", job_title="Intern",
 )
 
 from workready_api.team_directory import get_team_for_application

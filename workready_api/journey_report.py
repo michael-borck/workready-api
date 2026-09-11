@@ -71,8 +71,9 @@ def build_journey_report(application_id: int) -> dict[str, Any] | None:
 
     meta = {
         "application_id": application_id,
-        "student_name": student.get("name", ""),
-        "student_email": student.get("email", ""),
+        "student_code": student.get("code", ""),
+        "student_handle": student.get("handle", ""),
+        "student_name": student.get("display_name") or "",
         "company_slug": app_data["company_slug"],
         "company_name": job.get("company", app_data["company_slug"]),
         "job_title": app_data.get("job_title", ""),

@@ -30,7 +30,7 @@ from workready_api.db import (
     get_attachments,
     get_message,
     get_sent_messages,
-    get_student_by_email,
+    get_active_student_by_code,
     get_thread,
     soft_delete_message,
 )
@@ -165,7 +165,7 @@ def _build_culture_hint(resolved, company: dict) -> str:
 
 class ComposeRequest(BaseModel):
     """Compose a new message."""
-    student_email: str
+    student_code: str
     recipient_email: str
     subject: str
     body: str
@@ -173,7 +173,7 @@ class ComposeRequest(BaseModel):
 
 class ReplyRequest(BaseModel):
     """Reply to a message."""
-    student_email: str
+    student_code: str
     body: str
 
 
@@ -216,7 +216,7 @@ class AttachmentInfo(BaseModel):
 @router.post("/compose", response_model=SendResult)
 async def compose_message(
     background_tasks: BackgroundTasks,
-    student_email: str = Form(...),
+    student_code: str = Form(...),
     recipient_email: str = Form(...),
     subject: str = Form(...),
     body: str = Form(""),
@@ -228,7 +228,7 @@ async def compose_message(
     If invalid → bounced (with a 'did you mean?' suggestion).
     If recipient is the system noreply → bounced with explanation.
     """
-    student = get_student_by_email(student_email)
+    student = get_active_student_by_code(student_code)
     if not student:
         raise HTTPException(404, "Student not found — sign in first")
 
@@ -264,8 +264,7 @@ async def compose_message(
         # Invalid address → bounce (no suggestions — real email doesn't offer them)
         msg_id = create_outbound_message(
             student_id=student["id"],
-            student_email=student_email,
-            recipient_email=recipient_email,
+                recipient_email=recipient_email,
             subject=subject,
             body=body,
             has_attachment=has_attachment,
@@ -282,8 +281,7 @@ async def compose_message(
 
         create_bounce_message(
             student_id=student["id"],
-            student_email=student_email,
-            original_recipient=recipient_email,
+                original_recipient=recipient_email,
             original_subject=subject,
         )
 
@@ -297,16 +295,14 @@ async def compose_message(
         # Can't reply to noreply — bounce with explanation
         msg_id = create_outbound_message(
             student_id=student["id"],
-            student_email=student_email,
-            recipient_email=recipient_email,
+                recipient_email=recipient_email,
             subject=subject,
             body=body,
             status="bounced",
         )
         create_message(
             student_id=student["id"],
-            student_email=student_email,
-            sender_name="Mail Delivery System",
+                sender_name="Mail Delivery System",
             subject=f"Cannot reply to: {recipient_email}",
             body=(
                 "This is an automated system address and does not accept replies.\n\n"
@@ -324,7 +320,6 @@ async def compose_message(
     # Valid address → delivered
     msg_id = create_outbound_message(
         student_id=student["id"],
-        student_email=student_email,
         recipient_email=recipient_email,
         subject=subject,
         body=body,
@@ -402,7 +397,7 @@ async def compose_message(
 async def reply_to_message(
     message_id: int,
     background_tasks: BackgroundTasks,
-    student_email: str = Form(...),
+    student_code: str = Form(...),
     body: str = Form(...),
     attachment: UploadFile | None = File(None),
 ) -> SendResult:
@@ -411,7 +406,7 @@ async def reply_to_message(
     Pre-fills the recipient from the original sender_email and threads
     the conversation via thread_id.
     """
-    student = get_student_by_email(student_email)
+    student = get_active_student_by_code(student_code)
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -453,8 +448,7 @@ async def reply_to_message(
         # Bounce — can't reply to this address
         msg_id = create_outbound_message(
             student_id=student["id"],
-            student_email=student_email,
-            recipient_email=sender_email,
+                recipient_email=sender_email,
             subject=subject,
             body=body,
             thread_id=thread_id,
@@ -467,8 +461,7 @@ async def reply_to_message(
         )
         create_message(
             student_id=student["id"],
-            student_email=student_email,
-            sender_name="Mail Delivery System",
+                sender_name="Mail Delivery System",
             subject=f"Reply failed: {sender_email}",
             body=f"{reason}\n\nTo contact a company, use their direct email "
                  "address — you can find it on their website's contact page.",
@@ -483,7 +476,6 @@ async def reply_to_message(
     # Delivered
     msg_id = create_outbound_message(
         student_id=student["id"],
-        student_email=student_email,
         recipient_email=sender_email,
         subject=subject,
         body=body,
@@ -552,10 +544,10 @@ async def reply_to_message(
     return SendResult(message_id=msg_id, status="delivered")
 
 
-@router.get("/sent/{email}", response_model=SentBox)
-def get_sent_box(email: str) -> SentBox:
+@router.get("/sent/{code}", response_model=SentBox)
+def get_sent_box(code: str) -> SentBox:
     """Get the student's sent messages."""
-    student = get_student_by_email(email)
+    student = get_active_student_by_code(code)
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -579,9 +571,9 @@ def get_sent_box(email: str) -> SentBox:
 
 
 @router.delete("/message/{message_id}")
-def delete_message(message_id: int, student_email: str) -> dict:
+def delete_message(message_id: int, student_code: str) -> dict:
     """Soft-delete a message."""
-    student = get_student_by_email(student_email)
+    student = get_active_student_by_code(student_code)
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -596,9 +588,9 @@ def delete_message(message_id: int, student_email: str) -> dict:
 
 
 @router.get("/thread/{thread_id}")
-def get_conversation_thread(thread_id: int, student_email: str) -> dict:
+def get_conversation_thread(thread_id: int, student_code: str) -> dict:
     """Get all messages in a thread (both inbound and outbound)."""
-    student = get_student_by_email(student_email)
+    student = get_active_student_by_code(student_code)
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -607,9 +599,9 @@ def get_conversation_thread(thread_id: int, student_email: str) -> dict:
 
 
 @router.get("/attachments/{message_id}")
-def get_message_attachments(message_id: int, student_email: str) -> dict:
+def get_message_attachments(message_id: int, student_code: str) -> dict:
     """Get attachment metadata for a message."""
-    student = get_student_by_email(student_email)
+    student = get_active_student_by_code(student_code)
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -678,7 +670,8 @@ def _schedule_bounceback(
     from workready_api.availability import compute_reply_deliver_at
     from workready_api.jobs import get_job
 
-    first_name = (student.get("name") or "").split()[0] if student.get("name") else "there"
+    display_name = student.get("display_name") or ""
+    first_name = display_name.split()[0] if display_name else "there"
     company_slug = (app_data or {}).get("company_slug", "")
     job = get_job(company_slug, (app_data or {}).get("job_slug", "")) or {}
     company_name = job.get("company", company_slug)
@@ -699,8 +692,7 @@ def _schedule_bounceback(
         )
         create_message(
             student_id=student["id"],
-            student_email=student.get("email", ""),
-            sender_name=JENNY_PROXY_SENDER_NAME,
+                sender_name=JENNY_PROXY_SENDER_NAME,
             sender_role=JENNY_PROXY_SENDER_ROLE,
             sender_email=_jenny_email_for_company(company_slug),
             subject=f"Re: {subject}",
@@ -722,8 +714,7 @@ def _schedule_bounceback(
         )
         create_message(
             student_id=student["id"],
-            student_email=student.get("email", ""),
-            sender_name=mentor_name,
+                sender_name=mentor_name,
             sender_role=f"Your mentor at {company_name}",
             sender_email=f"{mentor_name.lower().replace(' ', '.')}@"
                          f"{company_slug.replace('-', '')}.com.au",
@@ -743,8 +734,7 @@ def _schedule_bounceback(
         )
         create_message(
             student_id=student["id"],
-            student_email=student.get("email", ""),
-            sender_name="WorkReady",
+                sender_name="WorkReady",
             sender_role="Simulation guide",
             sender_email="noreply@workready.eduserver.au",
             subject="Heads up — channel check",
@@ -981,7 +971,7 @@ async def _handle_character_reply(
 
     # Dispatch via notify() so future channels (real email, etc.) inherit
     notify(
-        student_email=student["email"],
+        student_handle=student["handle"],
         event="application_received",  # closest match; won't affect routing
         content=NotifyContent(
             sender_name=name,
@@ -1013,7 +1003,7 @@ def _send_generic_ack(
     reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
 
     notify(
-        student_email=student["email"],
+        student_handle=student["handle"],
         event="application_received",
         content=NotifyContent(
             sender_name=company_name,
@@ -1083,7 +1073,6 @@ async def _handle_careers_application(
         job_slug=job_slug,
         job_title=job_title,
         source="email",
-        student_email=student["email"],
     )
 
     # Assess
@@ -1102,14 +1091,14 @@ async def _handle_careers_application(
     if result.proceed_to_interview:
         advance_stage(app_id, "interview")
         notify(
-            student_email=student["email"],
+            student_handle=student["handle"],
             event="interview_invitation",
             content=NotifyContent(
                 sender_name=f"{job.get('company', company_slug)} — Recruitment",
                 sender_role="Hiring Team",
                 subject=f"Your application for {job_title} — next steps",
                 body=(
-                    f"Dear {student['name']},\n\n"
+                    f"Dear {(student.get('display_name') or 'Candidate').split()[0] or 'Candidate'},\n\n"
                     f"Thank you for your application for the {job_title} role. "
                     f"We've reviewed your resume and would like to invite you "
                     f"to an interview.\n\n"
@@ -1123,14 +1112,14 @@ async def _handle_careers_application(
     else:
         set_application_status(app_id, "rejected")
         notify(
-            student_email=student["email"],
+            student_handle=student["handle"],
             event="application_rejected",
             content=NotifyContent(
                 sender_name=f"{job.get('company', company_slug)} — Recruitment",
                 sender_role="Hiring Team",
                 subject=f"Your application for {job_title}",
                 body=(
-                    f"Dear {student['name']},\n\n"
+                    f"Dear {(student.get('display_name') or 'Candidate').split()[0] or 'Candidate'},\n\n"
                     f"Thank you for your application for the {job_title} role. "
                     f"After careful consideration, we won't be progressing your "
                     f"application at this time.\n\n"

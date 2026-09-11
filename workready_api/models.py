@@ -68,8 +68,9 @@ class ApplicationDetail(BaseModel):
 class StudentProgress(BaseModel):
     """All applications for a student."""
 
-    email: str
-    name: str
+    code: str
+    handle: str
+    display_name: str | None = None
     applications: list[ApplicationSummary]
 
 
@@ -208,8 +209,9 @@ class BookingRequest(BaseModel):
 class StudentState(BaseModel):
     """High-level state for the portal — what the student should see."""
 
-    email: str
-    name: str
+    code: str
+    handle: str
+    display_name: str | None = None
     state: str  # NOT_APPLIED, APPLIED, HIRED, COMPLETED
     active_application: ApplicationSummary | None = None
     applications: list[ApplicationSummary]

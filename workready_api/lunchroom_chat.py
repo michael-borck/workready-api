@@ -726,7 +726,6 @@ def _deliver_system_feedback(session: dict[str, Any], feedback: str) -> None:
 
     create_message(
         student_id=student["id"],
-        student_email=student.get("email", ""),
         sender_name="WorkReady",
         sender_role="Simulation guide",
         sender_email="noreply@workready.eduserver.au",

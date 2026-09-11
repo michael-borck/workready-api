@@ -71,7 +71,9 @@ generators, deployment, and external tools.
 
 This is the canonical control flow. Numbers map to each touchpoint.
 
-1. **Sign in** at `workready-portal` (any email, no password). Portal calls
+1. **Sign in** at `workready-portal` with an issued access code
+   (`WR-XXXX-XXXX` — no email, no password; the code→person mapping lives
+   in the lecturer's own records, never on this server). Portal calls
    `GET /api/v1/student/{email}/state` → API creates the student row if new.
 
 2. **Browse** `workready-jobs` (seek.jobs). Postings are seeded at API
@@ -86,7 +88,7 @@ This is the canonical control flow. Numbers map to each touchpoint.
    with feedback.
 
 4. **Resume outcome** lands in the student's **personal** inbox in the
-   portal (Inbox tab). The portal polls `GET /api/v1/inbox/{email}` and
+   portal (Inbox tab). The portal polls `GET /api/v1/inbox/{code}` and
    renders messages whose `deliver_at` has passed.
 
 5. **Interview** (Stage 3) — student opens the Interview view in the
@@ -254,7 +256,7 @@ WORKREADY_DB=/tmp/wr.db LLM_PROVIDER=stub uv run uvicorn workready_api.app:app -
 # 2. Portal (any static server works)
 cd workready-portal
 python3 -m http.server 8001
-# Then open http://localhost:8001 — sign in with any email
+# Then open http://localhost:8001 — sign in with an access code
 
 # 3. seek.jobs (only needed if testing the apply flow end to end)
 cd workready-jobs/dist
@@ -262,10 +264,11 @@ python3 -m http.server 8002
 
 # 4. Quick smoke test of the full pipeline (no LLM needed)
 WORKREADY_DB=/tmp/wr.db LLM_PROVIDER=stub uv run python -c "
-from workready_api.db import init_db, get_or_create_student
+from workready_api.db import init_db, generate_codes, get_or_create_student
 init_db()
-s = get_or_create_student('test@example.com', 'Test Student')
-print('student id:', s['id'])
+code = generate_codes(1)[0]
+s = get_or_create_student(code)
+print('code:', code, '| handle:', s['handle'])
 "
 ```
 
@@ -376,8 +379,9 @@ All env-driven, all defined in `workready_api/scheduling.py`. Headline groups:
 ## Things that look like they exist but don't
 
 - No background workers / cron / queue. Every "later" feature is lazy-gated.
-- No session-based auth — every endpoint takes the student email as a
-  param. There's no password.
+- No session-based auth — every endpoint takes the access code (or
+  application-scoped id) as a param. No password, no PII stored; see
+  `docs/AUTH-MIGRATION.md` for the JWT/session follow-up plan.
 - No multi-student team tasks. Each student goes through alone.
 - No video/voice — every conversation is typed.
 - No aggregate grade in the journey report — by design. Lecturers grade.

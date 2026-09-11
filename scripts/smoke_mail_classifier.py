@@ -14,7 +14,7 @@ os.environ.setdefault("LLM_PROVIDER", "stub")
 pathlib.Path(os.environ["WORKREADY_DB"]).unlink(missing_ok=True)
 
 from workready_api.db import (
-    init_db, get_or_create_student, create_application, advance_stage,
+    init_db, get_or_create_student, generate_codes, create_application, advance_stage,
     get_db,
 )
 from workready_api.jobs import _COMPANY_CACHE, _JOB_CACHE
@@ -37,10 +37,10 @@ _JOB_CACHE[("mail-test", "analyst")] = {
     "team": ["karen-whitfield"],
 }
 
-s = get_or_create_student("mail@example.com", "Alex Tester")
+_code = generate_codes(1)[0]
+s = get_or_create_student(_code)
 app_id = create_application(
-    student_id=s["id"], student_email="mail@example.com",
-    company_slug="mail-test", job_slug="analyst", job_title="Analyst",
+    student_id=s["id"], company_slug="mail-test", job_slug="analyst", job_title="Analyst",
 )
 advance_stage(app_id, "placement")
 

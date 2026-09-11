@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -21,14 +23,37 @@ STAGES = [
     "exit",             # Stage 6: the exit interview
 ]
 
+# --- Access codes ("contractor codes") --------------------------------------
+# Identity = an issued access code (e.g. WR-4XKQ-9M2T). The server stores no
+# real email or name — the code→person mapping lives only in the lecturer's
+# own records (LMS/spreadsheet). Codes are CSPRNG random, not derived from
+# any personal data. The alphabet omits 0/O and 1/I/L because codes get
+# read off screens and typed in.
+CODE_PREFIX = "WR"
+CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+HANDLE_DOMAIN = "student.workready.eduserver.au"
+_CODE_RE = re.compile(
+    rf"^{CODE_PREFIX}-[{CODE_ALPHABET}]{{4}}-[{CODE_ALPHABET}]{{4}}$"
+)
+
 # Tables only — safe to run before migrations on legacy DBs because all
 # CREATE TABLE statements use IF NOT EXISTS. Indexes are split out so they
 # can run after migrations have added any missing columns.
 TABLES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS codes (
+    code TEXT PRIMARY KEY,
+    cohort TEXT NOT NULL DEFAULT 'default',
+    active INTEGER NOT NULL DEFAULT 1,
+    issued_at TEXT NOT NULL,
+    redeemed_at TEXT,
+    note TEXT                         -- lecturer memo; never student identity
+);
+
 CREATE TABLE IF NOT EXISTS students (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
+    code TEXT NOT NULL UNIQUE REFERENCES codes(code),
+    handle TEXT NOT NULL UNIQUE,      -- fictional in-simulation mailbox address
+    display_name TEXT,                -- optional self-declared; never verified
     created_at TEXT NOT NULL,
     last_login_at TEXT
 );
@@ -49,7 +74,6 @@ CREATE TABLE IF NOT EXISTS postings (
 CREATE TABLE IF NOT EXISTS applications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     student_id INTEGER NOT NULL REFERENCES students(id),
-    student_email TEXT NOT NULL,
     posting_id INTEGER REFERENCES postings(id),
     company_slug TEXT NOT NULL,
     job_slug TEXT NOT NULL,
@@ -93,7 +117,6 @@ CREATE TABLE IF NOT EXISTS interview_sessions (
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     student_id INTEGER NOT NULL REFERENCES students(id),
-    student_email TEXT NOT NULL,
     inbox TEXT NOT NULL DEFAULT 'personal',
     sender_name TEXT NOT NULL,
     sender_role TEXT,
@@ -106,6 +129,15 @@ CREATE TABLE IF NOT EXISTS messages (
     deliver_at TEXT NOT NULL,
     channel TEXT NOT NULL DEFAULT 'email',
     review_flag TEXT,
+    -- Columns formerly added by legacy migrations; folded into the
+    -- contractor-code baseline schema.
+    direction TEXT NOT NULL DEFAULT 'inbound',   -- inbound | outbound
+    sender_email TEXT NOT NULL DEFAULT 'noreply@workready.eduserver.au',
+    recipient_email TEXT,                        -- fictional addresses only
+    thread_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'delivered',    -- delivered | bounced
+    has_attachment INTEGER NOT NULL DEFAULT 0,
+    deleted_at TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -236,8 +268,10 @@ CREATE TABLE IF NOT EXISTS calendar_events (
 
 # Indexes — run AFTER migrations so any newly added columns exist
 INDEXES_SCHEMA = """
-CREATE INDEX IF NOT EXISTS idx_students_email
-    ON students(email);
+CREATE INDEX IF NOT EXISTS idx_students_code
+    ON students(code);
+CREATE INDEX IF NOT EXISTS idx_codes_cohort
+    ON codes(cohort);
 CREATE INDEX IF NOT EXISTS idx_applications_student
     ON applications(student_id);
 CREATE INDEX IF NOT EXISTS idx_applications_company_job
@@ -280,197 +314,16 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat_thread
 """
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Apply any incremental schema migrations to existing databases.
+    """Apply incremental schema migrations to existing databases.
 
-    Migrations are idempotent — they check for state before applying.
+    BASELINE NOTE: the contractor-code release (access-code identity,
+    no email/name columns) was a deliberate clean break — pre-baseline
+    databases are unsupported and were not migrated forward. All schema
+    changes from here on should be appended as new idempotent,
+    column-existence-guarded migrations in this function.
     """
-    # --- Migration 1: applications.status column ---
-    app_cols = _table_columns(conn, "applications")
-    if "status" not in app_cols:
-        conn.execute("ALTER TABLE applications ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
-        conn.execute("""
-            UPDATE applications SET status = 'rejected'
-            WHERE id IN (
-                SELECT a.id FROM applications a
-                JOIN stage_results sr ON sr.application_id = a.id
-                WHERE a.current_stage = 'resume' AND sr.stage = 'resume'
-                  AND sr.status = 'failed'
-            )
-        """)
-        app_cols = _table_columns(conn, "applications")
-
-    # --- Migration 2: students.id integer primary key ---
-    # Detect old schema (email is PK, no id column)
-    student_cols = _table_columns(conn, "students")
-    if "id" not in student_cols:
-        # Old schema: email is the PK. Need to rebuild the table with id PK,
-        # then update all FK references in applications and messages.
-        conn.execute("""
-            CREATE TABLE students_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            INSERT INTO students_new (email, name, created_at)
-            SELECT email, name, created_at FROM students
-        """)
-        conn.execute("DROP TABLE students")
-        conn.execute("ALTER TABLE students_new RENAME TO students")
-
-    # --- Migration 3: applications.student_id (replacing student_email FK) ---
-    app_cols = _table_columns(conn, "applications")
-    if "student_id" not in app_cols:
-        conn.execute("ALTER TABLE applications ADD COLUMN student_id INTEGER REFERENCES students(id)")
-        conn.execute("""
-            UPDATE applications SET student_id = (
-                SELECT id FROM students WHERE students.email = applications.student_email
-            )
-        """)
-        # Verify all rows got a student_id (or there were no rows)
-        unmapped = conn.execute(
-            "SELECT COUNT(*) FROM applications WHERE student_id IS NULL"
-        ).fetchone()[0]
-        if unmapped > 0:
-            raise RuntimeError(
-                f"Migration error: {unmapped} applications could not be mapped "
-                "to a student_id. Refusing to drop student_email column."
-            )
-
-    # --- Migration 4a: applications.current_interview_step ---
-    if "current_interview_step" not in app_cols:
-        conn.execute(
-            "ALTER TABLE applications ADD COLUMN current_interview_step "
-            "INTEGER NOT NULL DEFAULT 0"
-        )
-        app_cols = _table_columns(conn, "applications")
-
-    # --- Migration 4b: applications.posting_id ---
-    if "posting_id" not in app_cols:
-        conn.execute(
-            "ALTER TABLE applications ADD COLUMN posting_id INTEGER REFERENCES postings(id)"
-        )
-        app_cols = _table_columns(conn, "applications")
-
-    # --- Migration 4c: applications.cycle ---
-    if "cycle" not in app_cols:
-        conn.execute(
-            "ALTER TABLE applications ADD COLUMN cycle INTEGER NOT NULL DEFAULT 1"
-        )
-        app_cols = _table_columns(conn, "applications")
-
-    # --- Migration 4d: applications.missed_interviews ---
-    if "missed_interviews" not in app_cols:
-        conn.execute(
-            "ALTER TABLE applications ADD COLUMN missed_interviews "
-            "INTEGER NOT NULL DEFAULT 0"
-        )
-        app_cols = _table_columns(conn, "applications")
-
-    # --- Migration 4e: applications.reschedule_count ---
-    if "reschedule_count" not in app_cols:
-        conn.execute(
-            "ALTER TABLE applications ADD COLUMN reschedule_count "
-            "INTEGER NOT NULL DEFAULT 0"
-        )
-
-    # --- Migration 5: messages.booking_id ---
-    msg_cols = _table_columns(conn, "messages")
-    if "booking_id" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN booking_id INTEGER "
-            "REFERENCES interview_bookings(id)"
-        )
-
-    # --- Migration 4: messages.student_id (replacing student_email FK) ---
-    msg_cols = _table_columns(conn, "messages")
-    if "student_id" not in msg_cols:
-        conn.execute("ALTER TABLE messages ADD COLUMN student_id INTEGER REFERENCES students(id)")
-        conn.execute("""
-            UPDATE messages SET student_id = (
-                SELECT id FROM students WHERE students.email = messages.student_email
-            )
-        """)
-        unmapped = conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE student_id IS NULL"
-        ).fetchone()[0]
-        if unmapped > 0:
-            raise RuntimeError(
-                f"Migration error: {unmapped} messages could not be mapped to student_id."
-            )
-
-    # Note: we keep the old student_email columns for backwards compatibility.
-    # They are no longer authoritative — the new code reads/writes student_id.
-    # A future cleanup migration can drop them once we're confident.
-
-    # --- Migration 6: email system columns on messages ---
-    msg_cols = _table_columns(conn, "messages")
-
-    if "direction" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN direction TEXT NOT NULL DEFAULT 'inbound'"
-        )
-    if "sender_email" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN sender_email TEXT NOT NULL "
-            "DEFAULT 'noreply@workready.eduserver.au'"
-        )
-    if "recipient_email" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN recipient_email TEXT"
-        )
-    if "thread_id" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN thread_id INTEGER"
-        )
-    if "status" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'delivered'"
-        )
-    if "has_attachment" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN has_attachment INTEGER NOT NULL DEFAULT 0"
-        )
-    if "deleted_at" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN deleted_at TEXT"
-        )
-
-    # --- Migration 7: interview_sessions.kind (Stage 6 exit interview) ---
-    isess_cols = _table_columns(conn, "interview_sessions")
-    if "kind" not in isess_cols:
-        conn.execute(
-            "ALTER TABLE interview_sessions ADD COLUMN kind TEXT NOT NULL "
-            "DEFAULT 'hiring'"
-        )
-
-    # --- Migration 8: messages.channel (Stage 7 team chat) ---
-    msg_cols = _table_columns(conn, "messages")
-    if "channel" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN channel TEXT NOT NULL "
-            "DEFAULT 'email'"
-        )
-
-    # --- Migration 9: messages.review_flag (comms monitor classifier) ---
-    if "review_flag" not in msg_cols:
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN review_flag TEXT"
-        )
-
-    # --- Migration 10: students.last_login_at (business hours illusion) ---
-    student_cols = _table_columns(conn, "students")
-    if "last_login_at" not in student_cols:
-        conn.execute(
-            "ALTER TABLE students ADD COLUMN last_login_at TEXT"
-        )
+    return
 
 
 def _now() -> str:
@@ -534,47 +387,233 @@ def init_db() -> None:
         conn.executescript(INDEXES_SCHEMA)
 
 
-def get_student_by_email(email: str) -> dict[str, Any] | None:
-    """Look up a student by email. Returns dict with id/email/name/created_at/last_login_at."""
+def _normalize_code(code: str | None) -> str | None:
+    """Normalise a raw access code, or return None if it's malformed.
+
+    Accepts lowercase input and spaces instead of dashes; output is the
+    canonical form WR-XXXX-XXXX. Returns None for anything that doesn't
+    match the format — callers treat None as an invalid credential.
+    """
+    if not code:
+        return None
+    candidate = re.sub(r"\s+", "-", code.strip().upper())
+    if not _CODE_RE.fullmatch(candidate):
+        return None
+    return candidate
+
+
+def make_handle(code: str) -> str:
+    """Derive the student's fictional in-simulation mailbox from their code.
+
+    WR-4XKQ-9M2T → wr4xkq9m2t@student.workready.eduserver.au
+    Deterministic so the handle is stable across sessions.
+    """
+    local = code.replace("-", "").lower()
+    return f"{local}@{HANDLE_DOMAIN}"
+
+
+def generate_codes(
+    count: int,
+    cohort: str = "default",
+    note: str | None = None,
+) -> list[str]:
+    """Issue `count` new access codes. Returns the codes.
+
+    Codes are CSPRNG random and uniqueness-checked against the whole
+    table. The caller (admin endpoint / CLI) hands them to the lecturer —
+    pairing them with humans happens entirely off-server.
+    """
+    if count < 1 or count > 1000:
+        raise ValueError("count must be between 1 and 1000")
+    with get_db() as conn:
+        existing = {r[0] for r in conn.execute("SELECT code FROM codes")}
+        fresh: list[str] = []
+        while len(fresh) < count:
+            body = "-".join(
+                "".join(secrets.choice(CODE_ALPHABET) for _ in range(4))
+                for _ in range(2)
+            )
+            candidate = f"{CODE_PREFIX}-{body}"
+            if candidate in existing:
+                continue
+            existing.add(candidate)
+            fresh.append(candidate)
+        now = _now()
+        conn.executemany(
+            "INSERT INTO codes (code, cohort, active, issued_at, note) "
+            "VALUES (?, ?, 1, ?, ?)",
+            [(c, cohort, now, note) for c in fresh],
+        )
+    return fresh
+
+
+def get_code(code: str) -> dict[str, Any] | None:
+    """Look up a code row (regardless of active state). Normalises input."""
+    normalized = _normalize_code(code)
+    if not normalized:
+        return None
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, email, name, created_at, last_login_at FROM students WHERE email = ?",
-            (email,),
+            "SELECT * FROM codes WHERE code = ?", (normalized,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def redeem_code(code: str) -> dict[str, Any] | None:
+    """Return the code row if it exists AND is active — else None.
+
+    Fail-closed: unknown or revoked codes never yield a student record.
+    """
+    normalized = _normalize_code(code)
+    if not normalized:
+        return None
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM codes WHERE code = ? AND active = 1",
+            (normalized,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def revoke_code(code: str) -> bool:
+    """Deactivate a code. Returns True if a row was flipped."""
+    normalized = _normalize_code(code)
+    if not normalized:
+        return False
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE codes SET active = 0 WHERE code = ? AND active = 1",
+            (normalized,),
+        )
+    return cursor.rowcount > 0
+
+
+def list_codes(
+    cohort: str | None = None,
+    include_inactive: bool = True,
+) -> list[dict[str, Any]]:
+    """List issued codes (codes only — no identities exist here)."""
+    sql = "SELECT * FROM codes"
+    conditions: list[str] = []
+    params: list[Any] = []
+    if cohort:
+        conditions.append("cohort = ?")
+        params.append(cohort)
+    if not include_inactive:
+        conditions.append("active = 1")
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY issued_at DESC"
+    with get_db() as conn:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    return [dict(r) for r in rows]
+
+
+_STUDENT_COLS = "id, code, handle, display_name, created_at, last_login_at"
+
+
+def get_student_by_code(code: str) -> dict[str, Any] | None:
+    """Look up a student by access code. Normalises input.
+
+    Does NOT check whether the code is still active — use
+    get_active_student_by_code() at student-facing entrypoints so
+    revocation takes effect immediately. Admin inspection intentionally
+    bypasses the activity check.
+    """
+    normalized = _normalize_code(code)
+    if not normalized:
+        return None
+    with get_db() as conn:
+        row = conn.execute(
+            f"SELECT {_STUDENT_COLS} FROM students WHERE code = ?",
+            (normalized,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_active_student_by_code(code: str) -> dict[str, Any] | None:
+    """Student-facing resolution: code must exist AND be active.
+
+    Returns None for unknown, malformed, or revoked codes.
+    """
+    if not redeem_code(code):
+        return None
+    return get_student_by_code(code)
+
+
+def get_student_by_handle(handle: str) -> dict[str, Any] | None:
+    """Look up a student by their fictional in-simulation mailbox address."""
+    with get_db() as conn:
+        row = conn.execute(
+            f"SELECT {_STUDENT_COLS} FROM students WHERE handle = ?",
+            ((handle or "").strip().lower(),),
         ).fetchone()
     return dict(row) if row else None
 
 
 def get_student_by_id(student_id: int) -> dict[str, Any] | None:
-    """Look up a student by internal id. Returns dict with id/email/name/created_at/last_login_at."""
+    """Look up a student by internal id."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, email, name, created_at, last_login_at FROM students WHERE id = ?",
+            f"SELECT {_STUDENT_COLS} FROM students WHERE id = ?",
             (student_id,),
         ).fetchone()
     return dict(row) if row else None
 
 
-def get_or_create_student(email: str, name: str) -> dict[str, Any]:
-    """Get existing student or create a new one. Returns dict with id."""
-    existing = get_student_by_email(email)
+def get_all_students() -> list[dict[str, Any]]:
+    """All students, newest first (admin listing)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT {_STUDENT_COLS} FROM students ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_or_create_student(code: str) -> dict[str, Any] | None:
+    """Redeem an access code, returning its student record.
+
+    Creates the student row on first redemption (fail-closed: unknown,
+    malformed, or revoked codes return None and never create anything).
+    Revocation is immediate — a previously-redeemed but since-revoked
+    code no longer resolves. The handle is derived deterministically
+    from the code so it's stable.
+    """
+    normalized = _normalize_code(code)
+    if not normalized:
+        return None
+
+    # Validate against an active code BEFORE resolving any existing
+    # student, so revocation cuts off access right away.
+    if not redeem_code(normalized):
+        return None
+
+    existing = get_student_by_code(normalized)
     if existing:
-        if existing["name"] != name:
-            with get_db() as conn:
-                conn.execute(
-                    "UPDATE students SET name = ? WHERE id = ?",
-                    (name, existing["id"]),
-                )
-                existing["name"] = name
         return existing
 
     now = _now()
+    handle = make_handle(normalized)
     with get_db() as conn:
         cursor = conn.execute(
-            "INSERT INTO students (email, name, created_at) VALUES (?, ?, ?)",
-            (email, name, now),
+            "INSERT INTO students (code, handle, display_name, created_at) "
+            "VALUES (?, ?, NULL, ?)",
+            (normalized, handle, now),
+        )
+        conn.execute(
+            "UPDATE codes SET redeemed_at = COALESCE(redeemed_at, ?) "
+            "WHERE code = ?",
+            (now, normalized),
         )
         student_id = cursor.lastrowid
-    return {"id": student_id, "email": email, "name": name, "created_at": now}
+    return {
+        "id": student_id,
+        "code": normalized,
+        "handle": handle,
+        "display_name": None,
+        "created_at": now,
+        "last_login_at": None,
+    }
 
 
 def mark_student_login(student_id: int) -> None:
@@ -590,13 +629,29 @@ def mark_student_login(student_id: int) -> None:
         )
 
 
+def set_display_name(student_id: int, name: str | None) -> dict[str, Any] | None:
+    """Set (or clear) the student's optional self-declared display name.
+
+    This is user-supplied simulation flavour, not verified personal data.
+    Pass None or empty string to clear it. Returns the refreshed record.
+    """
+    cleaned = (name or "").strip() or None
+    if cleaned and len(cleaned) > 60:
+        cleaned = cleaned[:60]
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE students SET display_name = ? WHERE id = ?",
+            (cleaned, student_id),
+        )
+    return get_student_by_id(student_id)
+
+
 def create_application(
     student_id: int,
     company_slug: str,
     job_slug: str,
     job_title: str,
     source: str = "direct",
-    student_email: str | None = None,
     posting_id: int | None = None,
     cycle: int | None = None,
 ) -> int:
@@ -606,10 +661,6 @@ def create_application(
     job. If cycle is not provided, uses get_next_cycle(student_id).
     """
     now = _now()
-    if student_email is None:
-        student = get_student_by_id(student_id)
-        student_email = student["email"] if student else ""
-
     if posting_id is None:
         direct = get_direct_posting(company_slug, job_slug)
         if direct:
@@ -621,10 +672,10 @@ def create_application(
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO applications
-               (student_id, student_email, posting_id, company_slug, job_slug,
+               (student_id, posting_id, company_slug, job_slug,
                 job_title, source, current_stage, cycle, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'resume', ?, ?, ?)""",
-            (student_id, student_email, posting_id, company_slug, job_slug,
+               VALUES (?, ?, ?, ?, ?, ?, 'resume', ?, ?, ?)""",
+            (student_id, posting_id, company_slug, job_slug,
              job_title, source, cycle, now, now),
         )
         return cursor.lastrowid  # type: ignore[return-value]
@@ -1055,32 +1106,26 @@ def create_message(
     application_id: int | None = None,
     related_stage: str | None = None,
     deliver_at: str | None = None,
-    student_email: str | None = None,
     booking_id: int | None = None,
     thread_id: int | None = None,
     channel: str = "email",
 ) -> int:
     """Create an inbound inbox message. Returns the message ID.
 
-    student_email is kept as a denormalised column for legacy compatibility
-    and is auto-resolved if not provided. booking_id ties the message to
-    a specific interview booking (used for reminder messages so they can
-    be cancelled if the booking is cancelled).
+    sender_email is a fictional in-simulation address, never a real one.
+    booking_id ties the message to a specific interview booking (used for
+    reminder messages so they can be cancelled if the booking is cancelled).
     """
     now = _now()
-    if student_email is None:
-        student = get_student_by_id(student_id)
-        student_email = student["email"] if student else ""
-
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO messages
-               (student_id, student_email, inbox, sender_name, sender_role,
+               (student_id, inbox, sender_name, sender_role,
                 sender_email, subject, body, application_id, booking_id,
                 related_stage, direction, channel, thread_id, deliver_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inbound', ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inbound', ?, ?, ?, ?)""",
             (
-                student_id, student_email, inbox, sender_name, sender_role,
+                student_id, inbox, sender_name, sender_role,
                 sender_email, subject, body, application_id, booking_id,
                 related_stage, channel, thread_id, deliver_at or now, now,
             ),
@@ -1147,7 +1192,6 @@ def get_sent_messages(
 
 def create_outbound_message(
     student_id: int,
-    student_email: str,
     recipient_email: str,
     subject: str,
     body: str,
@@ -1159,20 +1203,24 @@ def create_outbound_message(
 ) -> int:
     """Create an outbound message (student → recipient). Returns message ID.
 
-    status is 'delivered' for valid recipients, 'bounced' for invalid ones.
+    The sender identity is the student's fictional handle, resolved from
+    their student_id — never a real address. status is 'delivered' for
+    valid recipients, 'bounced' for invalid ones.
     """
     now = _now()
+    student = get_student_by_id(student_id)
+    sender_handle = (student or {}).get("handle") or "unknown@student.workready.eduserver.au"
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO messages
-               (student_id, student_email, inbox, sender_name, sender_role,
+               (student_id, inbox, sender_name, sender_role,
                 sender_email, subject, body, direction, recipient_email,
                 channel, thread_id, status, has_attachment, is_read, deliver_at,
                 created_at, application_id)
-               VALUES (?, ?, 'sent', ?, '', ?, ?, ?, 'outbound', ?,
+               VALUES (?, 'sent', ?, '', ?, ?, ?, 'outbound', ?,
                        ?, ?, ?, ?, 1, ?, ?, ?)""",
             (
-                student_id, student_email, student_email, student_email,
+                student_id, sender_handle, sender_handle,
                 subject, body, recipient_email,
                 channel, thread_id, status, int(has_attachment), now, now,
                 application_id,
@@ -1193,7 +1241,6 @@ def create_outbound_message(
 
 def create_bounce_message(
     student_id: int,
-    student_email: str,
     original_recipient: str,
     original_subject: str,
 ) -> int:
@@ -1212,7 +1259,6 @@ def create_bounce_message(
 
     return create_message(
         student_id=student_id,
-        student_email=student_email,
         sender_name="Mail Delivery System",
         sender_role="",
         subject=f"Delivery failed: {original_recipient}",

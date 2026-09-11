@@ -94,7 +94,7 @@ def build_mid_placement_context(application_id: int) -> dict[str, Any]:
         })
 
     return {
-        "student_name": student.get("name", ""),
+        "student_name": student.get("display_name") or "",
         "company_name": job.get("company", company_slug),
         "job_title": app_data.get("job_title", ""),
         "mentor_name": job.get("reports_to", "Your mentor"),

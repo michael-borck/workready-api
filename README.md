@@ -27,11 +27,11 @@ Swagger docs at `http://localhost:8000/docs`
 
 | Field | Type | Required |
 |-------|------|----------|
-| company_slug | string | yes |
-| job_slug | string | yes |
+| company_slug | string | yes (or posting_id) |
+| job_slug | string | yes (or posting_id) |
 | job_title | string | yes |
-| applicant_name | string | yes |
-| applicant_email | string | yes |
+| applicant_code | string | yes — issued access code `WR-XXXX-XXXX` |
+| applicant_name | string | no — optional self-declared display name |
 | cover_letter | string | no |
 | source | string | no — "direct" or "seek" |
 | resume | PDF file | yes |
@@ -39,15 +39,16 @@ Swagger docs at `http://localhost:8000/docs`
 Returns assessment with fit score, feedback, and whether to proceed to interview.
 
 ### Student Progress
-- `GET /api/v1/student/{email}` — all applications for a student
+- `GET /api/v1/student/{code}` — all applications for a student
 - `GET /api/v1/application/{id}` — full detail of an application with stage results
 
 ## Data Model
 
 ```
-students (email PK, name)
-    └── applications (company, job, current_stage)
-            └── stage_results (stage, status, score, feedback, attempt)
+codes (access code, cohort, active)
+    └── students (code FK, fictional handle — no email or name stored)
+            └── applications (company, job, current_stage)
+                    └── stage_results (stage, status, score, feedback, attempt)
 ```
 
 Stages: `job_board` → `resume` → `interview` → `placement` → `mid_placement` → `exit`

@@ -15,7 +15,7 @@ os.environ.setdefault("LLM_PROVIDER", "stub")
 pathlib.Path(os.environ["WORKREADY_DB"]).unlink(missing_ok=True)
 
 from workready_api.db import (
-    init_db, get_or_create_student, create_application, advance_stage,
+    init_db, get_or_create_student, generate_codes, create_application, advance_stage,
 )
 
 init_db()
@@ -28,10 +28,10 @@ JOB_TITLE = "Service Desk Analyst"
 CHARACTER_SLUG = "sam-okoro"
 CHARACTER_NAME = "Sam Okoro"
 
-s = get_or_create_student("chat@example.com", "Alex Tester")
+_code = generate_codes(1)[0]
+s = get_or_create_student(_code)
 app_id = create_application(
-    student_id=s["id"], student_email="chat@example.com",
-    company_slug=COMPANY_SLUG, job_slug=JOB_SLUG, job_title=JOB_TITLE,
+    student_id=s["id"], company_slug=COMPANY_SLUG, job_slug=JOB_SLUG, job_title=JOB_TITLE,
 )
 advance_stage(app_id, "placement")
 
@@ -41,10 +41,17 @@ proc = subprocess.Popen(
     env={**os.environ},
 )
 try:
-    time.sleep(3)
-
     import httpx
     base = "http://127.0.0.1:8702"
+
+    # Wait for the server to accept requests (cold start can be slow)
+    for _ in range(30):
+        try:
+            httpx.get(f"{base}/api/v1/postings", timeout=2)
+            break
+        except httpx.ConnectError:
+            time.sleep(1)
+
 
     # --- Test 1: POST /chat/send ---
     r = httpx.post(f"{base}/api/v1/chat/send", json={
@@ -71,8 +78,19 @@ try:
     assert thread["character_name"] == CHARACTER_NAME, (
         f"Expected '{CHARACTER_NAME}', got '{thread['character_name']}'"
     )
-    assert thread["presence_ok"] is True
-    print(f"  [3/3] thread metadata correct (character_name, presence_ok)")
+    # presence_ok reflects simulated business hours — only meaningful
+    # to assert when "now" falls inside them (Mon-Fri 09:00-17:00 local)
+    import datetime as _dt
+    _now_local = _dt.datetime.now()
+    _in_hours = _now_local.weekday() < 5 and 9 <= _now_local.hour < 17
+    if _in_hours:
+        assert thread["presence_ok"] is True, (
+            f"expected present during business hours, got {thread['presence_ok']}"
+        )
+        print(f"  [3/3] thread metadata correct (character_name, presence_ok)")
+    else:
+        print(f"  [3/3] thread metadata ok (presence_ok={thread['presence_ok']} — "
+              f"outside business hours, not asserted)")
 
 finally:
     proc.terminate()

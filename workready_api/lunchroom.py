@@ -339,7 +339,8 @@ def create_invitation(
 
     # Compose the inbox invitation message
     student = get_student_by_id(application["student_id"]) or {}
-    first_name = (student.get("name") or "").split()[0] if student.get("name") else "there"
+    display_name = student.get("display_name") or ""
+    first_name = display_name.split()[0] if display_name else "there"
     inviter = participants[0]  # use the first picked colleague as the inviter
     inviter_name = inviter["name"]
     slot_lines = "\n".join(
@@ -367,7 +368,6 @@ def create_invitation(
 
     msg_id = create_message(
         student_id=student["id"],
-        student_email=student.get("email", application.get("student_email", "")),
         sender_name=inviter_name,
         sender_role=f"{inviter['role']} at {company_name}" if inviter.get("role") else company_name,
         subject=_invitation_subject(occasion, occasion_detail, company_name),
@@ -540,7 +540,8 @@ def maybe_send_decline_check_in(application_id: int) -> bool:
     company_name = job.get("company", app_data["company_slug"])
     mentor_name = job.get("reports_to", "Your mentor")
     student = get_student_by_id(app_data["student_id"]) or {}
-    first_name = (student.get("name") or "").split()[0] if student.get("name") else "there"
+    display_name = student.get("display_name") or ""
+    first_name = display_name.split()[0] if display_name else "there"
 
     body = (
         f"Hey {first_name},\n\n"
@@ -557,7 +558,6 @@ def maybe_send_decline_check_in(application_id: int) -> bool:
     )
     create_message(
         student_id=student.get("id") or 0,
-        student_email=student.get("email") or app_data.get("student_email", ""),
         sender_name=mentor_name,
         sender_role=f"Your mentor at {company_name}",
         subject=marker_subject,

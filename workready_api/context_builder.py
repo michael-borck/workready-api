@@ -46,7 +46,7 @@ VERBATIM_TAIL_COUNT = 4
 class CharacterContext:
     student_name: str = ""
     student_first_name: str = ""
-    student_email: str = ""
+    student_handle: str = ""
     company_name: str = ""
     job_title: str = ""
     current_stage: str = ""
@@ -78,10 +78,11 @@ async def build_character_context(
     job = get_job(company_slug, job_slug) or {}
     company = get_company(company_slug) or {}
 
+    display_name = student.get("display_name") or ""
     ctx = CharacterContext(
-        student_name=student.get("name", ""),
-        student_first_name=(student.get("name") or "").split()[0] if student.get("name") else "",
-        student_email=student.get("email", ""),
+        student_name=display_name,
+        student_first_name=display_name.split()[0] if display_name else "",
+        student_handle=student.get("handle", ""),
         company_name=job.get("company", company_slug),
         job_title=app_data.get("job_title", job_slug),
         current_stage=app_data.get("current_stage", ""),

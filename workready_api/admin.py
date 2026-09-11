@@ -13,6 +13,7 @@ These endpoints intentionally bypass the normal state machine. They are
 from __future__ import annotations
 
 import os
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,15 +23,18 @@ from workready_api.db import (
     advance_stage,
     create_application,
     create_message,
+    generate_codes,
     get_application,
     get_bookings_for_application,
+    get_code,
     get_db,
     get_inbox,
-    get_or_create_student,
     get_stage_results,
     get_student_applications,
-    get_student_by_email,
+    get_student_by_code,
+    list_codes,
     record_stage_result,
+    revoke_code,
     set_application_status,
 )
 from workready_api.jobs import get_job
@@ -47,7 +51,7 @@ def require_admin_token(authorization: str | None = Header(None)) -> None:
             detail="Admin endpoints disabled — set WORKREADY_ADMIN_TOKEN in the API .env",
         )
     expected = f"Bearer {ADMIN_TOKEN}"
-    if authorization != expected:
+    if not authorization or not secrets.compare_digest(authorization, expected):
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
@@ -78,7 +82,8 @@ def list_students() -> dict:
     """List all students with a quick state summary."""
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, email, name, created_at FROM students ORDER BY created_at DESC"
+            "SELECT id, code, handle, display_name, created_at, last_login_at "
+            "FROM students ORDER BY created_at DESC"
         ).fetchall()
         students = []
         for r in rows:
@@ -92,16 +97,20 @@ def list_students() -> dict:
             student["applications"] = [dict(a) for a in apps]
             student["application_count"] = len(student["applications"])
 
-            # Compute high-level state from active applications (mirrors the
-            # logic in the public /student/{email}/state endpoint)
-            active = [a for a in student["applications"] if a["status"] == "active"]
-            if not active:
+            # Compute high-level state from live applications (mirrors the
+            # logic in the public /student/{code}/state endpoint). 'hired'
+            # and 'completed' applications drive state just like 'active'.
+            live = [
+                a for a in student["applications"]
+                if a["status"] in ("active", "hired", "completed")
+            ]
+            if not live:
                 student["state"] = "NOT_APPLIED"
             else:
-                stage = active[0]["current_stage"]
+                stage = live[0]["current_stage"]
                 if stage == "resume":
                     student["state"] = "APPLIED"
-                elif stage == "completed":
+                elif stage == "completed" or live[0]["status"] == "completed":
                     student["state"] = "COMPLETED"
                 else:
                     student["state"] = f"HIRED:{stage}"
@@ -140,11 +149,11 @@ def get_journey_report(application_id: int) -> dict:
     return report
 
 
-@router.get("/students/{email}")
-def get_student_dump(email: str) -> dict:
+@router.get("/students/{code}")
+def get_student_dump(code: str) -> dict:
     """Full state dump for a single student — applications, messages,
     bookings, interview sessions, stage results."""
-    student = get_student_by_email(email)
+    student = get_student_by_code(code)
     if not student:
         raise HTTPException(404, detail="Student not found")
 
@@ -189,26 +198,68 @@ def get_student_dump(email: str) -> dict:
 
 
 # ============================================================
+# Access-code management
+# ============================================================
+
+
+@router.post("/codes/generate")
+def generate_access_codes(payload: dict) -> dict:
+    """Issue new access codes. Returns the codes — and nothing else.
+
+    The code→person mapping never enters this system: the lecturer pairs
+    the returned codes with students in their own LMS/spreadsheet.
+
+    Payload: {"count": 10, "cohort": "sem1-2026", "note": "optional memo"}
+    """
+    try:
+        count = int(payload.get("count", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "count must be an integer")
+    cohort = (payload.get("cohort") or "default").strip() or "default"
+    note = payload.get("note")
+    if count < 1 or count > 1000:
+        raise HTTPException(400, "count must be between 1 and 1000")
+    codes = generate_codes(count, cohort=cohort, note=note)
+    return {"codes": codes, "cohort": cohort, "total": len(codes)}
+
+
+@router.get("/codes")
+def list_access_codes(
+    cohort: str | None = None,
+    include_inactive: bool = True,
+) -> dict:
+    """List issued access codes (no identities are stored or returned)."""
+    codes = list_codes(cohort=cohort, include_inactive=include_inactive)
+    return {"codes": codes, "total": len(codes)}
+
+
+@router.get("/codes/{code}")
+def get_access_code(code: str) -> dict:
+    """Inspect a single code — active state, redemption, cohort, note."""
+    row = get_code(code)
+    if not row:
+        raise HTTPException(404, detail="Code not found")
+    return row
+
+
+@router.post("/codes/{code}/revoke")
+def revoke_access_code(code: str) -> dict:
+    """Deactivate a code. Its student can no longer sign in."""
+    if not revoke_code(code):
+        raise HTTPException(404, detail="Active code not found")
+    return {"code": code.upper(), "active": False}
+
+
+# ============================================================
 # Mutation endpoints
 # ============================================================
 
 
-@router.post("/students")
-def create_test_student(payload: dict) -> dict:
-    """Create a student record without any application."""
-    email = payload.get("email", "").strip().lower()
-    if not email:
-        raise HTTPException(400, "email required")
-    name = payload.get("name") or email.split("@")[0].replace(".", " ").title()
-    student = get_or_create_student(email, name)
-    return {"student": student, "created": True}
-
-
-@router.post("/students/{email}/reset")
-def reset_student(email: str) -> dict:
+@router.post("/students/{code}/reset")
+def reset_student(code: str) -> dict:
     """Wipe all applications, messages, bookings, sessions, and stage results
     for a student. Keeps the student record itself."""
-    student = get_student_by_email(email)
+    student = get_student_by_code(code)
     if not student:
         raise HTTPException(404, "Student not found")
     sid = student["id"]
@@ -235,10 +286,11 @@ def reset_student(email: str) -> dict:
     return {"student_id": sid, "applications_removed": len(app_ids)}
 
 
-@router.delete("/students/{email}")
-def delete_student(email: str) -> dict:
-    """Hard-delete a student and all related data."""
-    student = get_student_by_email(email)
+@router.delete("/students/{code}")
+def delete_student(code: str) -> dict:
+    """Hard-delete a student and all related data. The access code stays
+    active — revoke it separately if it should not be reusable."""
+    student = get_student_by_code(code)
     if not student:
         raise HTTPException(404, "Student not found")
     sid = student["id"]
@@ -261,11 +313,11 @@ def delete_student(email: str) -> dict:
         conn.execute("DELETE FROM messages WHERE student_id = ?", (sid,))
         conn.execute("DELETE FROM applications WHERE student_id = ?", (sid,))
         conn.execute("DELETE FROM students WHERE id = ?", (sid,))
-    return {"deleted": True, "email": email}
+    return {"deleted": True, "code": student["code"]}
 
 
-@router.post("/students/{email}/state")
-def force_state(email: str, payload: dict) -> dict:
+@router.post("/students/{code}/state")
+def force_state(code: str, payload: dict) -> dict:
     """Force a student into a specific simulation state.
 
     Payload:
@@ -280,7 +332,7 @@ def force_state(email: str, payload: dict) -> dict:
     requested stage. Any existing active applications for this student
     are first marked 'rejected' to keep state coherent.
     """
-    student = get_student_by_email(email)
+    student = get_student_by_code(code)
     if not student:
         raise HTTPException(404, "Student not found — create one first")
 
@@ -323,7 +375,6 @@ def force_state(email: str, payload: dict) -> dict:
         company_slug=company_slug,
         job_slug=job_slug,
         job_title=job.get("title", job_slug),
-        student_email=email,
     )
 
     # Move to target stage
@@ -374,10 +425,10 @@ def force_outcome(application_id: int, payload: dict) -> dict:
     return {"application_id": application_id, "outcome": outcome}
 
 
-@router.post("/students/{email}/deliver-pending")
-def deliver_pending_messages(email: str) -> dict:
+@router.post("/students/{code}/deliver-pending")
+def deliver_pending_messages(code: str) -> dict:
     """Flush all delayed messages for a student — set deliver_at = now()."""
-    student = get_student_by_email(email)
+    student = get_student_by_code(code)
     if not student:
         raise HTTPException(404, "Student not found")
     now = _now()
@@ -390,11 +441,11 @@ def deliver_pending_messages(email: str) -> dict:
         return {"flushed": cursor.rowcount}
 
 
-@router.post("/students/{email}/note")
-def post_admin_note(email: str, payload: dict) -> dict:
+@router.post("/students/{code}/note")
+def post_admin_note(code: str, payload: dict) -> dict:
     """Inject a system message into the student's inbox — useful for
     smoke-testing inbox rendering and the unread badge."""
-    student = get_student_by_email(email)
+    student = get_student_by_code(code)
     if not student:
         raise HTTPException(404, "Student not found")
     subject = payload.get("subject") or "Admin test message"

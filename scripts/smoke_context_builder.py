@@ -15,7 +15,7 @@ os.environ.setdefault("LLM_PROVIDER", "stub")
 pathlib.Path(os.environ["WORKREADY_DB"]).unlink(missing_ok=True)
 
 from workready_api.db import (
-    init_db, get_or_create_student, create_application, create_message,
+    init_db, get_or_create_student, generate_codes, set_display_name, create_application, create_message,
     record_stage_result, get_db, advance_stage,
     create_outbound_message,
 )
@@ -39,10 +39,13 @@ _JOB_CACHE[("ctx-test", "analyst")] = {
     "company": "Context Test Co",
 }
 
-s = get_or_create_student("ctx@example.com", "Alex Tester")
+_code = generate_codes(1)[0]
+s = get_or_create_student(_code)
+# Display names are optional and self-declared now — set one so
+# character prompts have a first name to use.
+s = set_display_name(s["id"], "Alex Tester")
 app_id = create_application(
-    student_id=s["id"], student_email="ctx@example.com",
-    company_slug="ctx-test", job_slug="analyst", job_title="Analyst",
+    student_id=s["id"], company_slug="ctx-test", job_slug="analyst", job_title="Analyst",
 )
 
 # Seed prior stage results (record_stage_result overwrites current_stage,
@@ -72,14 +75,12 @@ with get_db() as conn:
 
 # Seed an email from Karen to the student and a reply
 create_message(
-    student_id=s["id"], student_email="ctx@example.com",
-    sender_name="Karen Whitfield", sender_role="Ops Lead at Context Test Co",
+    student_id=s["id"], sender_name="Karen Whitfield", sender_role="Ops Lead at Context Test Co",
     subject="Welcome!", body="Hi Alex, welcome to the team. Let me know if you have questions.",
     inbox="work", application_id=app_id, related_stage="placement",
 )
 create_outbound_message(
-    student_id=s["id"], student_email="ctx@example.com",
-    recipient_email="karen.whitfield@contexttest.com.au",
+    student_id=s["id"], recipient_email="karen.whitfield@contexttest.com.au",
     subject="Re: Welcome!", body="Thanks Karen, quick question about task 1...",
 )
 
@@ -113,8 +114,7 @@ print(f"  interview score: {ctx.interview_summary['score']}")
 # Stuff the thread with 60K chars of content
 for i in range(40):
     create_message(
-        student_id=s["id"], student_email="ctx@example.com",
-        sender_name="Karen Whitfield", sender_role="Ops Lead",
+        student_id=s["id"],     sender_name="Karen Whitfield", sender_role="Ops Lead",
         subject=f"Msg {i}", body="x" * 800,
         inbox="work", application_id=app_id, related_stage="placement",
     )

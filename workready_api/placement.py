@@ -167,7 +167,7 @@ def activate_work_placement(application_id: int, deliver_at: str) -> None:
 
     total_tasks = len(templates)
     welcome_body = (
-        f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
+        f"Hi {(student.get('display_name') or '').split()[0] or 'there'},\n\n"
         f"Welcome to {company_name} — I'm {mentor_name}, and I'll be your "
         f"mentor during your internship here. Really glad to have you on "
         f"the team.\n\n"
@@ -186,7 +186,6 @@ def activate_work_placement(application_id: int, deliver_at: str) -> None:
     )
     create_message(
         student_id=student["id"],
-        student_email=student["email"],
         sender_name=mentor_name,
         sender_role=f"Your mentor at {company_name}",
         subject=f"Welcome to {company_name} — your internship is on",
@@ -199,7 +198,7 @@ def activate_work_placement(application_id: int, deliver_at: str) -> None:
 
     if first_task_template:
         brief_body = (
-            f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
+            f"Hi {(student.get('display_name') or '').split()[0] or 'there'},\n\n"
             f"Here's your first task — a gentle start to get you into the "
             f"rhythm of how we work.\n\n"
             f"TASK: {first_task_template['title']}\n"
@@ -213,8 +212,7 @@ def activate_work_placement(application_id: int, deliver_at: str) -> None:
         )
         create_message(
             student_id=student["id"],
-            student_email=student["email"],
-            sender_name=mentor_name,
+                sender_name=mentor_name,
             sender_role=f"Your mentor at {company_name}",
             subject=f"Your first task — {first_task_template['title']}",
             body=brief_body,
@@ -266,7 +264,7 @@ def reveal_next_task_after_submission(application_id: int) -> dict[str, Any] | N
     if not student:
         return next_task
 
-    first_name = student["name"].split()[0] if student["name"] else "there"
+    first_name = (student.get("display_name") or "").split()[0] if student.get("display_name") else "there"
     brief_body = (
         f"Hi {first_name},\n\n"
         f"Good work wrapping up the last one. Here's your next task.\n\n"
@@ -281,7 +279,6 @@ def reveal_next_task_after_submission(application_id: int) -> dict[str, Any] | N
     )
     create_message(
         student_id=student["id"],
-        student_email=student["email"],
         sender_name=mentor_name,
         sender_role=f"Your mentor at {company_name}",
         subject=f"Next task — {next_task['title']}",

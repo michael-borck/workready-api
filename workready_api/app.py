@@ -41,7 +41,8 @@ from workready_api.db import (
     get_posting,
     get_stage_results,
     get_student_applications,
-    get_student_by_email,
+    get_active_student_by_code,
+    get_student_by_code,
     get_student_by_id,
     get_task,
     increment_missed_interviews,
@@ -57,6 +58,7 @@ from workready_api.db import (
     mark_task_submitted,
     record_stage_result,
     set_application_status,
+    set_display_name,
     update_booking_status,
     update_calendar_event_status,
 )
@@ -358,16 +360,16 @@ def health() -> dict:
 
 
 @app.get("/api/v1/postings", response_model=PostingList)
-def list_postings(email: str | None = None) -> PostingList:
+def list_postings(code: str | None = None) -> PostingList:
     """List all postings for the public job board.
 
-    If `email` is provided, the response respects which confidential
-    postings the student has had a reveal for. Without email, all
-    confidential postings are anonymised.
+    If `code` (an access code) is provided, the response respects which
+    confidential postings the student has had a reveal for. Without it,
+    all confidential postings are anonymised.
     """
     revealed_ids: set[int] = set()
-    if email:
-        student = get_student_by_email(email)
+    if code:
+        student = get_active_student_by_code(code)
         if student:
             revealed_ids = _revealed_postings_for_student(student["id"])
 
@@ -384,8 +386,8 @@ async def submit_resume(
     company_slug: str = Form(""),
     job_slug: str = Form(""),
     job_title: str = Form(...),
-    applicant_name: str = Form(...),
-    applicant_email: str = Form(...),
+    applicant_code: str = Form(...),
+    applicant_name: str = Form(""),
     cover_letter: str = Form(""),
     source: str = Form("direct"),
     posting_id: int | None = Form(None),
@@ -393,8 +395,12 @@ async def submit_resume(
 ) -> AssessmentResult:
     """Stage 2 — Submit a resume for assessment.
 
-    Creates a student record (if new), creates an application,
-    assesses the resume, and records the result.
+    Identifies the applicant by access code. `applicant_name` is an
+    optional self-declared display name (simulation flavour only, never
+    verified or required).
+
+    Creates the student record on first redemption of the code, creates
+    an application, assesses the resume, and records the result.
 
     If posting_id is provided, the company_slug/job_slug are resolved
     from the posting (so confidential agency listings don't expose the
@@ -430,8 +436,20 @@ async def submit_resume(
         job_description=job_description,
     )
 
-    # Persist student, application, and stage result
-    student = get_or_create_student(applicant_email, applicant_name)
+    # Persist student (fail-closed: unknown/revoked codes are rejected),
+    # application, and stage result
+    student = get_or_create_student(applicant_code)
+    if not student:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown or inactive access code — please check the code "
+                   "from your unit coordinator.",
+        )
+    if applicant_name.strip():
+        student = set_display_name(student["id"], applicant_name) or student
+    first_name = (
+        (student.get("display_name") or "").split()[0] or "there"
+    ) if student.get("display_name") else "there"
 
     # Lifecycle: enforce MAX_CYCLES — students can re-apply after a
     # rejection, resign, or completion, but only up to a configured cap.
@@ -453,7 +471,6 @@ async def submit_resume(
 
     application_id = create_application(
         student_id=student["id"],
-        student_email=applicant_email,
         company_slug=company_slug,
         job_slug=job_slug,
         job_title=job_title,
@@ -482,14 +499,14 @@ async def submit_resume(
     )
     confirmation_via = f" (via {agency_name})" if is_agency else ""
     notify(
-        student_email=applicant_email,
+        student_handle=student["handle"],
         event="application_received",
         content=NotifyContent(
             sender_name=confirmation_sender,
             sender_role="Recruitment" if is_agency else "Application System",
             subject=f"Application received — {listing_title}",
             body=(
-                f"Hi {applicant_name},\n\n"
+                f"Hi {first_name},\n\n"
                 f"Thank you for applying for the {listing_title} position{confirmation_via}. "
                 f"We have received your application and it is now under review. "
                 f"You will hear back from us shortly.\n\n"
@@ -528,14 +545,14 @@ async def submit_resume(
                 f"the opportunity and the team you'd be joining.\n\n"
             )
         notify(
-            student_email=applicant_email,
+            student_handle=student["handle"],
             event="interview_invitation",
             content=NotifyContent(
                 sender_name=f"{company_name} HR",
                 sender_role="Recruitment Team",
                 subject=f"Interview invitation — {job_title} at {company_name}",
                 body=(
-                    f"Dear {applicant_name},\n\n"
+                    f"Dear {first_name.title() if first_name != 'there' else 'Candidate'},\n\n"
                     f"{reveal_intro}"
                     f"Thank you for your application for the {job_title} role at "
                     f"{company_name}. We were impressed by your application and "
@@ -573,14 +590,14 @@ async def submit_resume(
         )
         reject_signoff = agency_name if is_confidential else f"{company_name} Recruitment"
         notify(
-            student_email=applicant_email,
+            student_handle=student["handle"],
             event="application_rejected",
             content=NotifyContent(
                 sender_name=reject_sender,
                 sender_role=reject_role,
                 subject=reject_subject,
                 body=(
-                    f"Dear {applicant_name},\n\n"
+                    f"Dear {first_name.title() if first_name != 'there' else 'Candidate'},\n\n"
                     f"Thank you for your interest in {reject_about} "
                     f"and for taking the time to submit your application.\n\n"
                     f"After careful consideration, we have decided not to "
@@ -605,10 +622,10 @@ async def submit_resume(
 # --- Student progress ---
 
 
-@app.get("/api/v1/student/{email}", response_model=StudentProgress)
-def get_student_progress(email: str) -> StudentProgress:
+@app.get("/api/v1/student/{code}", response_model=StudentProgress)
+def get_student_progress(code: str) -> StudentProgress:
     """Get all applications and progress for a student."""
-    student = get_student_by_email(email)
+    student = get_student_by_code(code)
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
@@ -617,37 +634,27 @@ def get_student_progress(email: str) -> StudentProgress:
         raise HTTPException(status_code=404, detail="Student has no applications")
 
     return StudentProgress(
-        email=email,
-        name=student["name"],
+        code=student["code"],
+        handle=student["handle"],
+        display_name=student.get("display_name"),
         applications=[
-            ApplicationSummary(**{k: v for k, v in a.items() if k not in ("student_email", "student_id")})
+            ApplicationSummary(**{k: v for k, v in a.items() if k != "student_id"})
             for a in applications
         ],
     )
 
 
-def _name_from_email(email: str) -> str:
-    """Derive a friendly name from an email address.
-
-    firstname.lastname@curtin.edu.au → Firstname Lastname
-    jdoe@curtin.edu.au → Jdoe
-    """
-    local = email.split("@")[0]
-    parts = local.replace("_", ".").replace("-", ".").split(".")
-    return " ".join(p.capitalize() for p in parts if p)
-
-
-def _send_welcome_email(email: str, name: str) -> None:
-    """Send the welcome notification to a newly registered student."""
+def _send_welcome_email(handle: str, first_name: str) -> None:
+    """Send the welcome notification to a newly redeemed access code."""
     notify(
-        student_email=email,
+        student_handle=handle,
         event="welcome",
         content=NotifyContent(
             sender_name="WorkReady Team",
             sender_role="Curtin University",
             subject="Welcome to WorkReady — Your Internship Journey Starts Here",
             body=(
-                f"Hi {name},\n\n"
+                f"Hi {first_name or 'there'},\n\n"
                 f"Welcome to WorkReady — a simulated internship experience where "
                 f"you can practise the full arc of a real placement, from finding "
                 f"a job through to your exit interview.\n\n"
@@ -680,43 +687,61 @@ def _send_welcome_email(email: str, name: str) -> None:
     )
 
 
-@app.get("/api/v1/student/{email}/state", response_model=StudentState)
-def get_student_state(email: str) -> StudentState:
+@app.get("/api/v1/student/{code}/state", response_model=StudentState)
+def get_student_state(code: str) -> StudentState:
     """Get the high-level state of a student for the portal.
 
-    On first lookup, creates the student record and sends a welcome email.
+    Identifies the student by access code. On first redemption, creates
+    the student record and sends a welcome message. Fail-closed: unknown,
+    malformed, or revoked codes are rejected — nothing is created.
     Returns the state machine value (NOT_APPLIED, APPLIED, HIRED, COMPLETED),
     active application if any, and unread message counts.
     """
-    student = get_student_by_email(email)
+    student = get_or_create_student(code)
 
-    # First-time sign-in: create student and send welcome email
+    # Fail closed on anything that isn't a live code
     if not student:
-        name = _name_from_email(email)
-        student = get_or_create_student(email, name)
-        _send_welcome_email(email, name)
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown or inactive access code — please check the code "
+                   "from your unit coordinator.",
+        )
+
+    display_name = student.get("display_name") or ""
+    first_name = display_name.split()[0] if display_name else ""
+    # First-ever sign-in (last_login_at still NULL): send the welcome message
+    if not student.get("last_login_at"):
+        _send_welcome_email(student["handle"], first_name)
 
     student_id = student["id"]
     mark_student_login(student_id)
     applications = get_student_applications(student_id)
 
-    # Determine state from the most recent ACTIVE application (if any).
+    # Determine state from the most recent live application (if any).
     # Rejected applications don't drive state — they just block the company.
+    # 'hired' and 'completed' applications DO drive state: hired is an
+    # active placement, and a completed application keeps the journey
+    # visible (badge COMPLETED, work views readable) after the exit
+    # interview. Without this, the real placement flow (which sets
+    # status='hired') would make every post-hire portal view vanish.
     state = "NOT_APPLIED"
     active = None
-    active_apps = [a for a in applications if a.get("status", "active") == "active"]
-    if active_apps:
-        latest = active_apps[0]
+    live_apps = [
+        a for a in applications
+        if a.get("status") in ("active", "hired", "completed")
+    ]
+    if live_apps:
+        latest = live_apps[0]
         active = ApplicationSummary(
-            **{k: v for k, v in latest.items() if k not in ("student_email", "student_id")}
+            **{k: v for k, v in latest.items() if k != "student_id"}
         )
         stage = latest["current_stage"]
-        if stage == "resume":
+        if latest.get("status") == "completed" or stage == "completed":
+            state = "COMPLETED"
+        elif stage == "resume":
             state = "APPLIED"
         elif stage in ("interview", "placement", "mid_placement", "exit"):
             state = "HIRED"
-        elif stage == "completed":
-            state = "COMPLETED"
 
     # Count unread messages per inbox
     personal_msgs = get_inbox(student_id, "personal")
@@ -727,12 +752,13 @@ def get_student_state(email: str) -> StudentState:
     blocked = get_blocked_for_student(student_id)
 
     return StudentState(
-        email=email,
-        name=student["name"],
+        code=student["code"],
+        handle=student["handle"],
+        display_name=display_name or None,
         state=state,
         active_application=active,
         applications=[
-            ApplicationSummary(**{k: v for k, v in a.items() if k not in ("student_email", "student_id")})
+            ApplicationSummary(**{k: v for k, v in a.items() if k != "student_id"})
             for a in applications
         ],
         unread_personal=unread_personal,
@@ -742,10 +768,10 @@ def get_student_state(email: str) -> StudentState:
     )
 
 
-@app.get("/api/v1/inbox/{email}", response_model=Inbox)
-def get_inbox_endpoint(email: str, inbox: str = "personal") -> Inbox:
+@app.get("/api/v1/inbox/{code}", response_model=Inbox)
+def get_inbox_endpoint(code: str, inbox: str = "personal") -> Inbox:
     """Get a student's inbox messages."""
-    student = get_student_by_email(email)
+    student = get_active_student_by_code(code)
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     messages = get_inbox(student["id"], inbox)
@@ -754,7 +780,7 @@ def get_inbox_endpoint(email: str, inbox: str = "personal") -> Inbox:
         messages=[
             Message(**{
                 k: v for k, v in {**m, "is_read": bool(m.get("is_read"))}.items()
-                if k not in ("student_id", "student_email")
+                if k != "student_id"
             })
             for m in messages
         ],
@@ -780,7 +806,7 @@ def get_application_detail(application_id: int) -> ApplicationDetail:
 
     return ApplicationDetail(
         application=ApplicationSummary(
-            **{k: v for k, v in app_data.items() if k not in ("student_email", "student_id")}
+            **{k: v for k, v in app_data.items() if k != "student_id"}
         ),
         stages=[
             StageResult(**s)
@@ -837,10 +863,11 @@ def resign_application(application_id: int) -> dict:
     job = get_job(app_data["company_slug"], app_data.get("job_slug", "")) or {}
     company_name = job.get("company", app_data["company_slug"])
     student = get_student_by_id(app_data["student_id"]) or {}
-    first_name = (student.get("name") or "").split()[0] or "there"
+    display_name = student.get("display_name") or ""
+    first_name = display_name.split()[0] if display_name else "there"
 
     notify(
-        student_email=app_data.get("student_email", ""),
+        student_handle=student.get("handle", ""),
         event="internship_complete",  # closest existing event
         content=NotifyContent(
             sender_name="WorkReady",
@@ -1117,7 +1144,7 @@ def _try_use_reschedule(application_id: int, app_data: dict) -> int:
 def _create_reminders(
     booking_id: int,
     application_id: int,
-    student_email: str,
+    student_handle: str,
     student_name: str,
     job_title: str,
     nice_time: str,
@@ -1139,7 +1166,7 @@ def _create_reminders(
 
     if twenty_four_h_before > now:
         notify(
-            student_email=student_email,
+            student_handle=student_handle,
             event="interview_invitation",  # closest event for now
             content=NotifyContent(
                 sender_name=sender_name,
@@ -1171,7 +1198,7 @@ def _create_reminders(
 
     if one_h_before > now:
         notify(
-            student_email=student_email,
+            student_handle=student_handle,
             event="interview_invitation",
             content=NotifyContent(
                 sender_name=sender_name,
@@ -1259,18 +1286,15 @@ def _check_for_missed_booking(application_id: int) -> bool:
         if new_count >= scheduling.MAX_MISSED_INTERVIEWS:
             set_application_status(application_id, "rejected")
             app_data = get_application(application_id) or {}
-            student_email = app_data.get("student_email", "")
+            _student_row = get_student_by_id(app_data.get("student_id", 0)) or {}
+            student_handle = _student_row.get("handle", "")
             company_slug = app_data.get("company_slug", "")
             job_title = app_data.get("job_title", "")
             job = get_job(company_slug, app_data.get("job_slug", "")) or {}
             company_name = job.get("company", company_slug)
-            student_name = (
-                get_student_by_email(student_email)["name"]
-                if student_email and get_student_by_email(student_email)
-                else ""
-            )
+            student_name = _student_row.get("display_name") or ""
             notify(
-                student_email=student_email,
+                student_handle=student_handle,
                 event="application_rejected",
                 content=NotifyContent(
                     sender_name=f"{company_name} HR",
@@ -1302,19 +1326,16 @@ def _check_for_missed_booking(application_id: int) -> bool:
         else:
             # Just notify they missed it and need to rebook
             app_data = get_application(application_id) or {}
-            student_email = app_data.get("student_email", "")
+            _student_row = get_student_by_id(app_data.get("student_id", 0)) or {}
+            student_handle = _student_row.get("handle", "")
             company_slug = app_data.get("company_slug", "")
             job_title = app_data.get("job_title", "")
             job = get_job(company_slug, app_data.get("job_slug", "")) or {}
             company_name = job.get("company", company_slug)
-            student_name = (
-                get_student_by_email(student_email)["name"]
-                if student_email and get_student_by_email(student_email)
-                else ""
-            )
+            student_name = _student_row.get("display_name") or ""
             remaining = scheduling.MAX_MISSED_INTERVIEWS - new_count
             notify(
-                student_email=student_email,
+                student_handle=student_handle,
                 event="application_rejected",  # reuse — it's an inbox notification
                 content=NotifyContent(
                     sender_name=f"{company_name} HR",
@@ -1475,17 +1496,14 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
     # not the company. Confidential listings stay anonymous in the
     # confirmation — the company is only revealed when the interview
     # actually starts.
-    student_email = app_data.get("student_email", "")
+    _student_row = get_student_by_id(app_data.get("student_id", 0)) or {}
+    student_handle = _student_row.get("handle", "")
     job_title = app_data.get("job_title", "")
     company_slug = app_data.get("company_slug", "")
     job = get_job(company_slug, app_data.get("job_slug", "")) or {}
     company_name = job.get("company", company_slug)
     manager_name = job.get("reports_to", "the hiring manager")
-    student_name = (
-        get_student_by_email(student_email)["name"]
-        if student_email and get_student_by_email(student_email)
-        else ""
-    )
+    student_name = _student_row.get("display_name") or ""
 
     # Look up the posting to determine if this was via an agency
     posting = None
@@ -1561,7 +1579,7 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
         reschedule_warning = ""
 
     notify(
-        student_email=student_email,
+        student_handle=student_handle,
         event="interview_invitation",  # closest event for now
         content=NotifyContent(
             sender_name=sender_name,
@@ -1595,7 +1613,7 @@ def book_interview(application_id: int, req: BookingRequest) -> BookingState:
     _create_reminders(
         booking_id=booking_id,
         application_id=application_id,
-        student_email=student_email,
+        student_handle=student_handle,
         student_name=student_name,
         job_title=display_role,
         nice_time=nice_time,
@@ -2012,12 +2030,9 @@ async def interview_end(session_id: int) -> InterviewSession:
     )
 
     # Notify the student via personal inbox
-    student_email = app_data.get("student_email", "")
-    student_name = (
-        get_student_by_email(student_email)["name"]
-        if student_email and get_student_by_email(student_email)
-        else ""
-    )
+    _student_row = get_student_by_id(app_data.get("student_id", 0)) or {}
+    student_handle = _student_row.get("handle", "")
+    student_name = _student_row.get("display_name") or ""
     feedback_block = _format_interview_feedback(feedback_dict, result.fit_score)
 
     # Interview feedback + placement onboarding share one deliver_at so the
@@ -2036,7 +2051,7 @@ async def interview_end(session_id: int) -> InterviewSession:
         advance_stage(application_id, "placement")
         activate_work_placement(application_id, interview_deliver_at)
         notify(
-            student_email=student_email,
+            student_handle=student_handle,
             event="interview_passed",
             content=NotifyContent(
                 sender_name=f"{company_name} HR",
@@ -2062,7 +2077,7 @@ async def interview_end(session_id: int) -> InterviewSession:
         # Failed interview — reject the application (company goes off-board)
         set_application_status(application_id, "rejected")
         notify(
-            student_email=student_email,
+            student_handle=student_handle,
             event="application_rejected",
             content=NotifyContent(
                 sender_name=f"{company_name} HR",
@@ -2255,10 +2270,11 @@ async def exit_interview_end(session_id: int) -> InterviewSession:
     # permanent record. Sender is the simulation, not Sam — this is the
     # wrap-up note, not another in-character message.
     app_data = get_application(application_id) or {}
-    student_email = app_data.get("student_email", "")
+    _student_row = get_student_by_id(app_data.get("student_id", 0)) or {}
+    student_handle = _student_row.get("handle", "")
     company_name = journey.get("company_name", "")
     notify(
-        student_email=student_email,
+        student_handle=student_handle,
         event="internship_complete",
         content=NotifyContent(
             sender_name="WorkReady",
@@ -2675,7 +2691,7 @@ async def submit_task(
     is_final_task = next_revealed is None
 
     # Schedule the mentor's feedback email (lazy-delivered via deliver_at)
-    student = get_student_by_email(app_data.get("student_email", ""))
+    student = get_student_by_id(app_data.get("student_id", 0))
     if student:
         bullet = lambda items: "\n".join(f"  • {s}" for s in items) if items else "  • (none)"
         if is_final_task:
@@ -2690,7 +2706,7 @@ async def submit_task(
                 "brief — that's how you'll get better, one task at a time."
             )
         feedback_body = (
-            f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
+            f"Hi {(student.get('display_name') or '').split()[0] if student.get('display_name') else 'there'},\n\n"
             f"I've had a look at your submission for \"{task['title']}\".\n\n"
             f"{feedback.summary}\n\n"
             f"WHAT WORKED:\n{bullet(feedback.strengths)}\n\n"
@@ -2702,7 +2718,6 @@ async def submit_task(
         from workready_api.db import create_message
         create_message(
             student_id=student["id"],
-            student_email=student["email"],
             sender_name=mentor_name,
             sender_role=f"Your mentor at {company_name}",
             subject=f"Feedback on your task — {task['title']}",
@@ -2722,7 +2737,7 @@ async def submit_task(
         if is_final_task:
             advance_stage(application_id, "exit")
             wrapup_body = (
-                f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
+                f"Hi {(student.get('display_name') or '').split()[0] if student.get('display_name') else 'there'},\n\n"
                 f"You've completed all of your work tasks at {company_name}. "
                 f"Congratulations on getting through the program — take a "
                 f"moment to recognise that.\n\n"
@@ -2736,8 +2751,7 @@ async def submit_task(
             )
             create_message(
                 student_id=student["id"],
-                student_email=student["email"],
-                sender_name=f"{company_name}",
+                    sender_name=f"{company_name}",
                 sender_role="HR",
                 subject=f"Wrap-up conversation ready — {company_name}",
                 body=wrapup_body,
@@ -2754,7 +2768,7 @@ async def submit_task(
     if task.get("sequence") == 2 and student:
         try:
             perf_review_body = (
-                f"Hi {student['name'].split()[0] if student['name'] else 'there'},\n\n"
+                f"Hi {(student.get('display_name') or '').split()[0] if student.get('display_name') else 'there'},\n\n"
                 f"You're a couple of tasks in now — nice work getting "
                 f"this far. Before you kick off the next brief, swing by "
                 f"my desk for a quick check-in. Won't take long; I just "
@@ -2766,8 +2780,7 @@ async def submit_task(
             )
             create_message(
                 student_id=student["id"],
-                student_email=student["email"],
-                sender_name=mentor_name,
+                    sender_name=mentor_name,
                 sender_role=f"Your mentor at {company_name}",
                 subject=f"Quick check-in before task 3",
                 body=perf_review_body,
@@ -3142,7 +3155,7 @@ async def post_lunchroom_message(
     # Resolve student name for display
     app_data = get_application(session["application_id"]) or {}
     student = get_student_by_id(app_data.get("student_id", 0)) if app_data else None
-    full_name = (student or {}).get("name") or "You"
+    full_name = (student or {}).get("display_name") or "You"
     student_name = full_name.split()[0] if full_name else "You"
 
     result = lunchroom_chat_mod.post_student_message(
@@ -3238,7 +3251,6 @@ async def chat_send(req: ChatSendRequest) -> dict:
     # 1. Persist student's outbound message
     student_msg_id = create_outbound_message(
         student_id=student["id"],
-        student_email=student.get("email", ""),
         recipient_email=char_email,
         subject="",
         body=req.content,
@@ -3296,7 +3308,7 @@ async def chat_send(req: ChatSendRequest) -> dict:
         import os as _os
         if _os.environ.get("LLM_PROVIDER", "stub").lower() == "stub":
             reply_text = (
-                f"Hey {student.get('name', '').split()[0] if student.get('name') else 'there'}! "
+                f"Hey {(student.get('display_name') or '').split()[0] if student.get('display_name') else 'there'}! "
                 f"Thanks for the message. Let me look into that and get back to you shortly."
             )
         else:
@@ -3309,7 +3321,6 @@ async def chat_send(req: ChatSendRequest) -> dict:
 
         _create_inbound(
             student_id=student["id"],
-            student_email=student.get("email", ""),
             sender_name=ctx.character_name,
             sender_role=ctx.character_role + " at " + ctx.company_name,
             sender_email=char_email,

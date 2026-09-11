@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from workready_api.db import create_message, get_student_by_email
+from workready_api.db import create_message, get_student_by_handle
 
 
 # --- Event types ---
@@ -106,7 +106,7 @@ _EVENT_ROUTES: dict[EventType, list[Channel]] = {
 
 def _resolve_channels(
     event: EventType,
-    student_email: str,
+    student_handle: str,
     requested: list[Channel] | str,
 ) -> list[Channel]:
     """Decide which channels to dispatch on for this event.
@@ -128,7 +128,7 @@ def _resolve_channels(
 
 
 def notify(
-    student_email: str,
+    student_handle: str,
     event: EventType,
     content: NotifyContent,
     channels: list[Channel] | str = "auto",
@@ -136,30 +136,31 @@ def notify(
     """Send a notification to a student via one or more channels.
 
     Args:
-        student_email: who to notify
+        student_handle: the student's fictional in-simulation mailbox
+            address (never a real email)
         event: the event type (drives default routing)
         content: structured content (sender, subject, body, etc.)
         channels: "auto" (default) uses event routes, or pass an explicit list
 
     Example:
         notify(
-            student_email="jane@curtin.edu.au",
+            student_handle="wr4xkq9m2t@student.workready.eduserver.au",
             event="interview_invitation",
             content=NotifyContent(
                 sender_name="NexusPoint Systems HR",
                 sender_role="Recruitment Team",
                 subject="Interview invitation — Junior Security Analyst",
-                body="Dear Jane, ...",
+                body="Dear candidate, ...",
                 application_id=42,
                 related_stage="interview",
             ),
         )
     """
-    targets = _resolve_channels(event, student_email, channels)
+    targets = _resolve_channels(event, student_handle, channels)
     for channel in targets:
         handler = _REGISTRY[channel]
         try:
-            handler(student_email, content)
+            handler(student_handle, content)
         except Exception as exc:  # noqa: BLE001
             # Don't let one channel failure block the others
             import logging
@@ -172,18 +173,17 @@ def notify(
 # --- Built-in channel: in-app inbox ---
 
 
-def _inapp_handler(student_email: str, content: NotifyContent) -> None:
+def _inapp_handler(student_handle: str, content: NotifyContent) -> None:
     """Deliver to the student's personal in-app inbox."""
-    student = get_student_by_email(student_email)
+    student = get_student_by_handle(student_handle)
     if not student:
         import logging
         logging.getLogger(__name__).warning(
-            "in_app handler: no student found for email %s", student_email,
+            "in_app handler: no student found for handle %s", student_handle,
         )
         return
     create_message(
         student_id=student["id"],
-        student_email=student_email,
         sender_name=content.sender_name,
         sender_role=content.sender_role,
         sender_email=content.extra.get("sender_email", "noreply@workready.eduserver.au"),
