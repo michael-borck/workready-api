@@ -39,14 +39,14 @@ from workready_api.email_registry import (
     resolve_address,
 )
 from workready_api.notifications import NotifyContent, notify
+from workready_api.auth import StudentRoute, authenticated_student
+from workready_api.pdf import redact_contact_details, store_filtered_pdf
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/mail", tags=["mail"])
+router = APIRouter(prefix="/api/v1/mail", tags=["mail"], route_class=StudentRoute)
 
-ATTACHMENTS_DIR = Path(
-    os.environ.get("WORKREADY_ATTACHMENTS_DIR", "")
-) or Path(os.environ.get("WORKREADY_DB", "workready.db")).parent / "attachments"
+ATTACHMENTS_DIR = Path(os.environ["WORKREADY_ATTACHMENTS_DIR"]) if os.environ.get("WORKREADY_ATTACHMENTS_DIR") else Path(os.environ.get("WORKREADY_DB", "workready.db")).parent / "attachments"
 
 MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024  # 5 MB
 
@@ -216,7 +216,6 @@ class AttachmentInfo(BaseModel):
 @router.post("/compose", response_model=SendResult)
 async def compose_message(
     background_tasks: BackgroundTasks,
-    student_code: str = Form(...),
     recipient_email: str = Form(...),
     subject: str = Form(...),
     body: str = Form(""),
@@ -228,12 +227,15 @@ async def compose_message(
     If invalid → bounced (with a 'did you mean?' suggestion).
     If recipient is the system noreply → bounced with explanation.
     """
-    student = get_active_student_by_code(student_code)
+    student = authenticated_student()
     if not student:
         raise HTTPException(404, "Student not found — sign in first")
 
     recipient_email = recipient_email.strip().lower()
-    subject = subject.strip()
+    subject = redact_contact_details(subject.strip()[:300])
+    body = redact_contact_details(body[:50000])
+    if resolve_address(recipient_email) is None:
+        recipient_email = 'unrecognised@simulation.invalid'
     if not subject:
         subject = "(no subject)"
 
@@ -252,10 +254,8 @@ async def compose_message(
         # Store in data/attachments/{student_id}/{filename}
         student_dir = ATTACHMENTS_DIR / str(student["id"])
         student_dir.mkdir(parents=True, exist_ok=True)
-        # Sanitise filename
-        safe_name = Path(attachment.filename).name
-        attachment_path = student_dir / safe_name
-        attachment_path.write_bytes(content)
+        attachment_path = store_filtered_pdf(content, student_dir)
+        attachment.filename = 'attachment.pdf'
 
     # Resolve the recipient
     resolved = resolve_address(recipient_email)
@@ -397,7 +397,6 @@ async def compose_message(
 async def reply_to_message(
     message_id: int,
     background_tasks: BackgroundTasks,
-    student_code: str = Form(...),
     body: str = Form(...),
     attachment: UploadFile | None = File(None),
 ) -> SendResult:
@@ -406,11 +405,12 @@ async def reply_to_message(
     Pre-fills the recipient from the original sender_email and threads
     the conversation via thread_id.
     """
-    student = get_active_student_by_code(student_code)
+    student = authenticated_student()
     if not student:
         raise HTTPException(404, "Student not found")
 
     original = get_message(message_id)
+    body = redact_contact_details(body[:50000])
     if not original:
         raise HTTPException(404, "Original message not found")
     if original["student_id"] != student["id"]:
@@ -437,9 +437,8 @@ async def reply_to_message(
         has_attachment = True
         student_dir = ATTACHMENTS_DIR / str(student["id"])
         student_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = Path(attachment.filename).name
-        attachment_path = student_dir / safe_name
-        attachment_path.write_bytes(content)
+        attachment_path = store_filtered_pdf(content, student_dir)
+        attachment.filename = 'attachment.pdf'
 
     # Resolve and send via the compose logic
     resolved = resolve_address(sender_email)
@@ -544,10 +543,10 @@ async def reply_to_message(
     return SendResult(message_id=msg_id, status="delivered")
 
 
-@router.get("/sent/{code}", response_model=SentBox)
-def get_sent_box(code: str) -> SentBox:
+@router.get("/sent", response_model=SentBox)
+def get_sent_box() -> SentBox:
     """Get the student's sent messages."""
-    student = get_active_student_by_code(code)
+    student = authenticated_student()
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -571,9 +570,9 @@ def get_sent_box(code: str) -> SentBox:
 
 
 @router.delete("/message/{message_id}")
-def delete_message(message_id: int, student_code: str) -> dict:
+def delete_message(message_id: int) -> dict:
     """Soft-delete a message."""
-    student = get_active_student_by_code(student_code)
+    student = authenticated_student()
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -588,9 +587,9 @@ def delete_message(message_id: int, student_code: str) -> dict:
 
 
 @router.get("/thread/{thread_id}")
-def get_conversation_thread(thread_id: int, student_code: str) -> dict:
+def get_conversation_thread(thread_id: int) -> dict:
     """Get all messages in a thread (both inbound and outbound)."""
-    student = get_active_student_by_code(student_code)
+    student = authenticated_student()
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -599,9 +598,9 @@ def get_conversation_thread(thread_id: int, student_code: str) -> dict:
 
 
 @router.get("/attachments/{message_id}")
-def get_message_attachments(message_id: int, student_code: str) -> dict:
+def get_message_attachments(message_id: int) -> dict:
     """Get attachment metadata for a message."""
-    student = get_active_student_by_code(student_code)
+    student = authenticated_student()
     if not student:
         raise HTTPException(404, "Student not found")
 
@@ -1042,18 +1041,16 @@ async def _handle_careers_application(
         _send_generic_ack(student, resolved, subject)
         return
 
-    # Find the first open job for this company (simplification — in future
-    # could match by subject line keyword)
-    job_key = None
-    for (cs, js), job in _JOB_CACHE.items():
-        if cs == company_slug:
-            job_key = (cs, js)
-            break
-
-    if not job_key:
-        _send_generic_ack(student, resolved, subject)
+    # Do not silently apply to the first role. Match an explicit title/slug.
+    matches = [(cs, slug) for (cs, slug), listing in _JOB_CACHE.items()
+               if cs == company_slug and (listing.get('title', slug).lower() in subject.lower() or slug.lower() in subject.lower())]
+    if len(matches) != 1:
+        notify(student_handle=student['handle'], event='application_received', content=NotifyContent(
+            sender_name='Recruitment team', sender_role='Simulated recruitment',
+            subject='Please specify the role for your application',
+            body='Please resend your application with the full job title in the subject, or use Quick Apply on the job board. No application has been created yet.'))
         return
-
+    job_key = matches[0]
     job = _JOB_CACHE[job_key]
     company_slug, job_slug = job_key
     job_title = job.get("title", job_slug)
@@ -1069,6 +1066,11 @@ async def _handle_careers_application(
         resume_text = ""
 
     # Create application
+    from workready_api import scheduling
+    from workready_api.db import get_next_cycle
+    if get_next_cycle(student['id']) > scheduling.MAX_CYCLES:
+        _send_generic_ack(student, resolved, subject)
+        return
     app_id = create_application(
         student_id=student["id"],
         company_slug=company_slug,
@@ -1079,7 +1081,7 @@ async def _handle_careers_application(
 
     # Assess
     job_description = job.get("description", "")
-    result = await assess(resume_text, job_description, job_title, body)
+    result = await assess(resume_text=resume_text, cover_letter=redact_contact_details(body), job_title=job_title, job_description=job_description)
 
     # Record result
     record_stage_result(

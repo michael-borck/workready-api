@@ -26,6 +26,29 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+PRESETS = {
+    'custom': {},
+    'workshop': {
+        'INTERVIEW_BOOKING_ENABLED': False, 'LUNCHROOM_INVITE_LEAD_HOURS': 0,
+        'LUNCHROOM_TIME_OF_DAY_START': 0, 'LUNCHROOM_TIME_OF_DAY_END': 23,
+        'LUNCHROOM_EARLY_ENTRY_MINUTES': 1440, 'TASK_DEADLINE_DAYS': 1,
+        'LUNCHROOM_BEAT_INTERVAL_SECONDS': 6, 'LUNCHROOM_BEAT_JITTER_SECONDS': 1,
+        'TASK_NEXT_TASK_DELAY_MINUTES': 0, 'TASK_FEEDBACK_DELAY_MINUTES': 0,
+        'RESUME_FEEDBACK_DELAY_MINUTES': 0, 'INTERVIEW_FEEDBACK_DELAY_MINUTES': 0,
+    },
+    'semester': {
+        'INTERVIEW_BOOKING_ENABLED': True, 'RESUME_FEEDBACK_DELAY_MINUTES': 180,
+        'RESUME_FEEDBACK_DELAY_JITTER_MINUTES': 120, 'INTERVIEW_FEEDBACK_DELAY_MINUTES': 60,
+        'TASK_DEADLINE_DAYS': 14, 'TASK_NEXT_TASK_DELAY_MINUTES': 1440,
+        'TASK_FEEDBACK_DELAY_MINUTES': 120, 'TASK_FEEDBACK_DELAY_JITTER_MINUTES': 60,
+        'LUNCHROOM_INVITE_LEAD_HOURS': 24,
+    },
+}
+PRESET_NAME = os.environ.get('SIMULATION_PRESET', 'custom')
+if PRESET_NAME not in PRESETS:
+    raise ValueError('SIMULATION_PRESET must be custom, workshop or semester')
+PRESET = PRESETS[PRESET_NAME]
+
 
 def _env_bool(name: str, default: bool) -> bool:
     val = os.environ.get(name, "").lower()
@@ -33,10 +56,11 @@ def _env_bool(name: str, default: bool) -> bool:
         return True
     if val in ("0", "false", "no", "off"):
         return False
-    return default
+    return PRESET.get(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
+    default = PRESET.get(name, default)
     try:
         return int(os.environ.get(name, str(default)))
     except (ValueError, TypeError):

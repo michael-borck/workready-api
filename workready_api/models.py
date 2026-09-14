@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # --- Resume assessment ---
@@ -68,7 +68,6 @@ class ApplicationDetail(BaseModel):
 class StudentProgress(BaseModel):
     """All applications for a student."""
 
-    code: str
     handle: str
     display_name: str | None = None
     applications: list[ApplicationSummary]
@@ -147,7 +146,7 @@ class InterviewStartRequest(BaseModel):
 
 class InterviewMessageRequest(BaseModel):
     session_id: int
-    message: str
+    message: str = Field(min_length=1, max_length=10000)
     code: str = ""
 
 
@@ -211,7 +210,7 @@ class BookingRequest(BaseModel):
 class PersonaRequest(BaseModel):
     """Set the student's self-declared persona (candidate profile name)."""
 
-    display_name: str
+    display_name: str = Field(min_length=1, max_length=60)
 
 
 class PersonaResponse(BaseModel):
@@ -224,7 +223,6 @@ class PersonaResponse(BaseModel):
 class StudentState(BaseModel):
     """High-level state for the portal — what the student should see."""
 
-    code: str
     handle: str
     display_name: str | None = None
     state: str  # NOT_APPLIED, APPLIED, HIRED, COMPLETED
@@ -236,6 +234,7 @@ class StudentState(BaseModel):
     blocked_companies: list[str] = []
     # Blocked specific roles (only this job is blocked, not the whole company)
     blocked_jobs: list[BlockedJob] = []
+    next_action: dict | None = None
 
 
 class Message(BaseModel):
@@ -414,6 +413,7 @@ class LunchroomSlotPickRequest(BaseModel):
     """Request body for picking a proposed slot."""
 
     scheduled_at: str  # must match one of the proposed slot ISO strings
+    code: str = ""  # ignored for identity; authenticated session is authoritative
 
 
 # --- Stage 5b: lunchroom chat ---
@@ -449,7 +449,7 @@ class LunchroomPostRequest(BaseModel):
     code: str = ""
     """Request body for a student posting to the chat."""
 
-    content: str
+    content: str = Field(min_length=1, max_length=3000)
 
 
 # --- Stage 7: Team directory ---
@@ -491,7 +491,7 @@ class TeamDirectoryResponse(BaseModel):
 class ChatSendRequest(BaseModel):
     application_id: int
     character_slug: str
-    content: str
+    content: str = Field(min_length=1, max_length=10000)
     code: str = ""
 
 

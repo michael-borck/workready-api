@@ -20,7 +20,7 @@ Swagger docs at `http://localhost:8000/docs`
 ## Endpoints
 
 ### Health
-- `GET /health` — returns `{"status": "ok", "version": "0.2.0"}`
+- `GET /health` — returns `{"status": "ok", "version": "0.3.0"}`
 
 ### Stage 2: Resume Submission
 - `POST /api/v1/resume` — submit a resume for assessment (multipart form)
@@ -29,8 +29,7 @@ Swagger docs at `http://localhost:8000/docs`
 |-------|------|----------|
 | company_slug | string | yes (or posting_id) |
 | job_slug | string | yes (or posting_id) |
-| job_title | string | yes |
-| applicant_code | string | yes — issued access code `WR-XXXX-XXXX` |
+| job_title | string | optional; resolved from posting |
 | applicant_name | string | no — optional self-declared display name |
 | cover_letter | string | no |
 | source | string | no — "direct" or "seek" |
@@ -39,14 +38,17 @@ Swagger docs at `http://localhost:8000/docs`
 Returns assessment with fit score, feedback, and whether to proceed to interview.
 
 ### Student Progress
-- `GET /api/v1/student/{code}` — all applications for a student
+- `POST /api/v1/auth/login` with `{"code":"WR-XXXX-XXXX"}` exchanges the code for an eight-hour session. Send the returned token as `Authorization: Bearer ...` on private requests.
+- `POST /api/v1/auth/logout` invalidates that session. Revoking the enrolment code invalidates all of its sessions.
+- `GET /api/v1/me/state` and `GET /api/v1/me/progress` return the signed-in student's journey. Old code-bearing URLs return 410.
 - `GET /api/v1/application/{id}` — full detail of an application with stage results
 
 ## Data Model
 
 ```
 codes (access code, cohort, active)
-    └── students (code FK, fictional handle — no email or name stored)
+    └── students (code FK, fictional handle, chosen persona name)
+            ├── student_sessions (token hash, expiry)
             └── applications (company, job, current_stage)
                     └── stage_results (stage, status, score, feedback, attempt)
 ```
@@ -59,6 +61,14 @@ Stages: `job_board` → `resume` → `interview` → `placement` → `mid_placem
 |----------|---------|-------------|
 | SITES_DIR | `../../` | Path to company site directories (for job descriptions) |
 | WORKREADY_DB | `workready.db` | SQLite database path |
-| USE_LLM | `false` | Use Ollama for assessment instead of stub |
+| LLM_PROVIDER | `stub` | stub, ollama, anthropic, openrouter |
 | OLLAMA_BASE_URL | `http://localhost:11434` | Ollama API URL |
-| OLLAMA_MODEL | `llama3.2` | Model for assessment |
+| LLM_MODEL | provider-dependent | Model for assessment |
+| STUDENT_SESSION_HOURS | `8` | Session lifetime |
+| SIMULATION_PRESET | `custom` | custom, workshop or semester; individual env values override defaults |
+| WORKREADY_ATTACHMENTS_DIR | DB directory + `/attachments` | Durable filtered-PDF storage |
+| RETENTION_DAYS | `120` | Inactivity threshold for operator-triggered cohort purge |
+
+Use synthetic profiles and resumes. Contact filtering is best-effort, not guaranteed anonymity. Student messages, submissions and feedback are retained for lecturer review. Cloud providers receive filtered prompts when selected.
+
+Tests: `uv run python -m unittest discover -s tests -v`.

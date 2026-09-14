@@ -63,11 +63,10 @@ generators, deployment, and external tools.
   → API loads via `load_jobs()` in `jobs.py`. Two locations exist in dev
   (`loco-ensyo/<slug>/jobs.json` and `workready-api/jobs/<slug>.json`) — keep
   both in sync when seeding manually.
-- **No resume persistence.** Extracted resume text is processed in memory
-  only (contact details redacted at import, `pdf.py`), passed to the
-  configured assessor, then discarded — nothing about the resume is
-  written to the DB. The email-apply path does persist the attachment
-  via `mail.py` (it's part of the student's fictional inbox).
+- **Resume handling.** Web resumes are processed in memory with a filtered
+  text preview before assessment. Feedback is stored. Mail attachments are
+  rebuilt as filtered text PDFs in the durable attachment directory. Contact
+  filtering is best-effort; names and identifying context can remain.
 
 ## A student's full journey — what touches what
 
@@ -76,7 +75,8 @@ This is the canonical control flow. Numbers map to each touchpoint.
 1. **Sign in** at `workready-portal` with an issued access code
    (`WR-XXXX-XXXX` — no email, no password; the code→person mapping lives
    in the lecturer's own records, never on this server). Portal calls
-   `GET /api/v1/student/{email}/state` → API creates the student row if new.
+   `POST /api/v1/auth/login` exchanges the code for an expiring opaque session.
+   Private requests use its bearer token, including `GET /api/v1/me/state`.
 
 2. **Browse** `workready-jobs` (seek.jobs). Postings are seeded at API
    startup from each company's `jobs.json`. Job board calls
@@ -90,7 +90,7 @@ This is the canonical control flow. Numbers map to each touchpoint.
    with feedback.
 
 4. **Resume outcome** lands in the student's **personal** inbox in the
-   portal (Inbox tab). The portal polls `GET /api/v1/inbox/{code}` and
+   portal (Inbox tab). The portal polls authenticated `GET /api/v1/inbox` and
    renders messages whose `deliver_at` has passed.
 
 5. **Interview** (Stage 3) — student opens the Interview view in the
@@ -381,12 +381,11 @@ All env-driven, all defined in `workready_api/scheduling.py`. Headline groups:
 ## Things that look like they exist but don't
 
 - No background workers / cron / queue. Every "later" feature is lazy-gated.
-- No session-based auth — every endpoint takes the access code (or
-  application-scoped id) as a param. No password, no PII stored. All
-  application/session-scoped routes enforce **ownership guards** (404 on
-  cross-student access) and code-entry endpoints are **rate-limited**
-  (10 bad codes/min/IP → 429). Bearer-token sessions remain the planned
-  follow-up; see `docs/AUTH-MIGRATION.md`.
+- Student sessions use opaque bearer tokens with hashed server-side storage,
+  expiry, logout and enrolment-code revocation. All private routes share
+  authentication and ownership checks. Login requests are limited before
+  credential validation. Participation is pseudonymous, not anonymous.
+  See `workready-deploy/PRIVACY-RELEASE.md` for rollout and retention.
 - No multi-student team tasks. Each student goes through alone.
 - No video/voice — every conversation is typed.
 - No aggregate grade in the journey report — by design. Lecturers grade.

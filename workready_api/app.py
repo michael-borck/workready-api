@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
-from collections import deque
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,6 +13,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile, Qu
 from fastapi.middleware.cors import CORSMiddleware
 
 from workready_api.assessor import assess
+from workready_api import __version__
 from workready_api.blocking import get_blocked_for_student
 from workready_api.db import (
     advance_stage,
@@ -139,6 +138,7 @@ from workready_api.models import (
     ChatThreadResponse,
 )
 from workready_api.pdf import extract_text, redact_contact_details
+from workready_api.auth import StudentRoute, RequestBoundary, authenticated_student, init_sessions, router as auth_router
 
 SITE_SLUGS = [
     "nexuspoint-systems",
@@ -153,6 +153,7 @@ SITE_SLUGS = [
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialise database and load job data on startup."""
     init_db()
+    init_sessions()
     sites_dir = Path(os.environ.get("SITES_DIR", str(Path(__file__).parent.parent.parent)))
     load_jobs(sites_dir, SITE_SLUGS)
     # Auto-seed postings from loaded jobs (idempotent — safe on every startup)
@@ -169,7 +170,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="WorkReady Simulation API",
-    version="0.2.0",
+    version=__version__,
     description=(
         "Backend for the WorkReady internship simulation. "
         "Tracks student progress through 6 stages: job board, resume, "
@@ -177,6 +178,9 @@ app = FastAPI(
     ),
     lifespan=lifespan,
 )
+app.router.route_class = StudentRoute
+app.add_middleware(RequestBoundary)
+app.include_router(auth_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -357,7 +361,20 @@ def _build_public_posting(
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": __version__}
+
+
+@app.get('/api/v1/privacy')
+def privacy_settings() -> dict:
+    provider = os.environ.get('LLM_PROVIDER', 'stub').lower()
+    return {'provider': provider if provider in ('stub', 'ollama', 'anthropic', 'openrouter') else 'unrecognised configuration',
+            'pacing': scheduling.PRESET_NAME,
+            'profile': 'Use an invented name and supplied synthetic resumes.',
+            'stored': ['persona', 'simulation messages', 'transcripts', 'submissions', 'feedback'],
+            'filter': 'Best-effort contact filtering; names and contextual identifiers may remain.',
+            'retention_days': int(os.environ.get('RETENTION_DAYS', '120')),
+            'retention': 'Lecturers manage cohort erasure; expired-cohort purges are available to the operator.',
+            'ai': 'Cloud providers receive filtered prompts when selected. Hiring-desk chat is a separate service.'}
 
 
 # --- Ownership guards --------------------------------------------------------
@@ -366,11 +383,8 @@ def health() -> dict:
 # IDs stay unenumerable.
 
 def _require_code(code: str | None) -> dict:
-    """Resolve the caller's student from an access code — fail closed."""
-    student = get_active_student_by_code(code or "")
-    if not student:
-        raise HTTPException(status_code=401, detail="Unknown or inactive access code")
-    return student
+    """Legacy call sites resolve identity from the authenticated session only."""
+    return authenticated_student()
 
 
 def _owned_application_or_404(application_id: int, code: str | None) -> dict:
@@ -404,29 +418,11 @@ def _owned_lunchroom_session_or_404(session_id: int, code: str | None) -> dict:
     return _owned_application_or_404(sess["application_id"], code)
 
 
-# --- Code-entry rate limiting (anti-enumeration) ------------------------------
-_RATE: dict = {}
-_RATE_LIMIT_FAILURES = 10
-_RATE_LIMIT_WINDOW_SECONDS = 60.0
-
-
-def _rate_limited(ip: str) -> bool:
-    now = time.monotonic()
-    q = _RATE.setdefault(ip, deque())
-    while q and now - q[0] > _RATE_LIMIT_WINDOW_SECONDS:
-        q.popleft()
-    return len(q) >= _RATE_LIMIT_FAILURES
-
-
-def _record_code_failure(ip: str) -> None:
-    _RATE.setdefault(ip, deque()).append(time.monotonic())
-
-
 # --- Public job board (for seek.jobs) ---
 
 
 @app.get("/api/v1/postings", response_model=PostingList)
-def list_postings(code: str | None = None) -> PostingList:
+def list_postings(request: Request) -> PostingList:
     """List all postings for the public job board.
 
     If `code` (an access code) is provided, the response respects which
@@ -434,10 +430,8 @@ def list_postings(code: str | None = None) -> PostingList:
     all confidential postings are anonymised.
     """
     revealed_ids: set[int] = set()
-    if code:
-        student = get_active_student_by_code(code)
-        if student:
-            revealed_ids = _revealed_postings_for_student(student["id"])
+    if request.headers.get("authorization"):
+        revealed_ids = _revealed_postings_for_student(authenticated_student()["id"])
 
     postings = get_all_postings()
     public = [_build_public_posting(p, revealed_ids) for p in postings]
@@ -447,15 +441,22 @@ def list_postings(code: str | None = None) -> PostingList:
 # --- Stage 2: Resume submission ---
 
 
+@app.post('/api/v1/resume/preview')
+async def preview_resume(resume: UploadFile = File(...), cover_letter: str = Form('')) -> dict:
+    """Authenticated in-memory preview. The student can remove missed identifiers."""
+    return {'resume_text': redact_contact_details(extract_text(await resume.read())),
+            'cover_letter': redact_contact_details(cover_letter[:10000])}
+
+
 @app.post("/api/v1/resume", response_model=AssessmentResult)
 async def submit_resume(
     submit_resume_request: Request,
     company_slug: str = Form(""),
     job_slug: str = Form(""),
-    job_title: str = Form(...),
-    applicant_code: str = Form(...),
+    job_title: str = Form(""),
     applicant_name: str = Form(""),
     cover_letter: str = Form(""),
+    reviewed_resume_text: str | None = Form(None),
     source: str = Form("direct"),
     posting_id: int | None = Form(None),
     resume: UploadFile = File(...),
@@ -474,6 +475,9 @@ async def submit_resume(
     real company in the form payload). If not provided, falls back to
     the company_slug/job_slug params (legacy direct apply forms).
     """
+    student = authenticated_student()
+    if get_next_cycle(student["id"]) > scheduling.MAX_CYCLES:
+        raise HTTPException(400, "Placement attempt limit reached. Please contact your lecturer.")
     # Resolve posting if specified
     posting = None
     if posting_id is not None:
@@ -481,18 +485,30 @@ async def submit_resume(
         if posting:
             company_slug = posting["company_slug"]
             job_slug = posting["job_slug"]
+            job_title = posting["listing_title"]
+        else:
+            raise HTTPException(404, "Job posting not found")
 
     if not company_slug or not job_slug:
         raise HTTPException(
             status_code=400,
             detail="Either posting_id or (company_slug, job_slug) is required",
         )
+    job = get_job(company_slug, job_slug)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    job_title = job_title or job.get("title", job_slug)
 
     # Extract text from uploaded PDF — and strip contact details. Students
     # may upload their real resume; the simulation needs the professional
     # content, never anyone's real email/phone/address.
     pdf_bytes = await resume.read()
     resume_text = redact_contact_details(extract_text(pdf_bytes))
+    if reviewed_resume_text is not None:
+        resume_text = redact_contact_details(reviewed_resume_text[:50000])
+        if not resume_text.strip():
+            raise HTTPException(400, 'Please include the professional content of your synthetic resume.')
+    cover_letter = redact_contact_details(cover_letter[:10000])
 
     # Look up the job description for comparison
     job_description = get_job_description(company_slug, job_slug)
@@ -505,18 +521,7 @@ async def submit_resume(
         job_description=job_description,
     )
 
-    # Persist student (fail-closed: unknown/revoked codes are rejected),
-    # application, and stage result
-    student = get_or_create_student(applicant_code)
-    if not student:
-        ip = submit_resume_request.client.host if submit_resume_request.client else "unknown"
-        _record_code_failure(ip)
-        status = 429 if _rate_limited(ip) else 400
-        raise HTTPException(
-            status_code=status,
-            detail="Unknown or inactive access code — please check the code "
-                   "from your unit coordinator.",
-        )
+    # Persist the assessed application for the authenticated student.
     if applicant_name.strip():
         student = set_persona(student["id"], applicant_name) or student
     first_name = (
@@ -694,10 +699,10 @@ async def submit_resume(
 # --- Student progress ---
 
 
-@app.get("/api/v1/student/{code}", response_model=StudentProgress)
-def get_student_progress(code: str) -> StudentProgress:
+@app.get("/api/v1/me/progress", response_model=StudentProgress)
+def get_student_progress() -> StudentProgress:
     """Get all applications and progress for a student."""
-    student = get_student_by_code(code)
+    student = authenticated_student()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
@@ -706,7 +711,6 @@ def get_student_progress(code: str) -> StudentProgress:
         raise HTTPException(status_code=404, detail="Student has no applications")
 
     return StudentProgress(
-        code=student["code"],
         handle=student["handle"],
         display_name=student.get("display_name"),
         applications=[
@@ -758,8 +762,8 @@ def _send_welcome_email(handle: str, first_name: str) -> None:
     )
 
 
-@app.get("/api/v1/student/{code}/state", response_model=StudentState)
-def get_student_state(code: str, request: Request) -> StudentState:
+@app.get("/api/v1/me/state", response_model=StudentState)
+def get_student_state(request: Request) -> StudentState:
     """Get the high-level state of a student for the portal.
 
     Identifies the student by access code. On first redemption, creates
@@ -768,19 +772,7 @@ def get_student_state(code: str, request: Request) -> StudentState:
     Returns the state machine value (NOT_APPLIED, APPLIED, HIRED, COMPLETED),
     active application if any, and unread message counts.
     """
-    student = get_or_create_student(code)
-
-    # Fail closed on anything that isn't a live code — and throttle
-    # enumeration attempts (10 bad codes/minute/IP).
-    if not student:
-        ip = request.client.host if request.client else "unknown"
-        _record_code_failure(ip)
-        status = 429 if _rate_limited(ip) else 400
-        raise HTTPException(
-            status_code=status,
-            detail="Unknown or inactive access code — please check the code "
-                   "from your unit coordinator.",
-        )
+    student = authenticated_student()
 
     display_name = student.get("display_name") or ""
     first_name = display_name.split()[0] if display_name else ""
@@ -815,7 +807,9 @@ def get_student_state(code: str, request: Request) -> StudentState:
             state = "COMPLETED"
         elif stage == "resume":
             state = "APPLIED"
-        elif stage in ("interview", "placement", "mid_placement", "exit"):
+        elif stage == 'interview':
+            state = 'INTERVIEW'
+        elif stage in ("placement", "mid_placement", "exit"):
             state = "HIRED"
 
     # Count unread messages per inbox
@@ -825,9 +819,22 @@ def get_student_state(code: str, request: Request) -> StudentState:
     unread_work = sum(1 for m in work_msgs if not m.get("is_read"))
 
     blocked = get_blocked_for_student(student_id)
+    next_action = None
+    if active and state != 'COMPLETED':
+        if active.current_stage == 'interview':
+            next_action = {'label': 'Your interview is ready', 'view': 'interview'}
+        elif active.current_stage == 'exit':
+            next_action = {'label': 'Reflect on your placement', 'view': 'exit-interview'}
+        else:
+            tasks = list_tasks_for_application(active.id, only_visible=True)
+            ready = [t for t in tasks if _effective_task_status(t) in ('assigned', 'resubmit', 'failed')]
+            if ready:
+                next_action = {'label': f"Task {ready[0]['sequence']}: {ready[0]['title']}", 'view': 'tasks'}
+            task_two_done = any(t['sequence'] == 2 and _effective_task_status(t) == 'passed' for t in tasks)
+            if task_two_done and not get_active_performance_review(active.id):
+                next_action = {'label': 'Have your mid-placement check-in before task 3', 'view': 'perf-review'}
 
     return StudentState(
-        code=student["code"],
         handle=student["handle"],
         display_name=display_name or None,
         state=state,
@@ -840,11 +847,12 @@ def get_student_state(code: str, request: Request) -> StudentState:
         unread_work=unread_work,
         blocked_companies=blocked["companies"],
         blocked_jobs=[BlockedJob(**j) for j in blocked["jobs"]],
+        next_action=next_action,
     )
 
 
-@app.post("/api/v1/student/{code}/profile", response_model=PersonaResponse)
-def set_student_persona(code: str, request: Request, req: PersonaRequest) -> PersonaResponse:
+@app.post("/api/v1/me/profile", response_model=PersonaResponse)
+def set_student_persona(request: Request, req: PersonaRequest) -> PersonaResponse:
     """Set the student's persona — their candidate-profile name.
 
     The name is self-declared simulation flavour (a stage name, never
@@ -853,7 +861,7 @@ def set_student_persona(code: str, request: Request, req: PersonaRequest) -> Per
     The in-sim mailbox is derived from it so the handle reads naturally
     ('jane.doe@…' rather than 'wr4xkq9m2t@…') while staying unlinkable.
     """
-    student = get_or_create_student(code)
+    student = authenticated_student()
     if not student:
         raise HTTPException(
             status_code=400,
@@ -870,15 +878,10 @@ def set_student_persona(code: str, request: Request, req: PersonaRequest) -> Per
     )
 
 
-@app.get("/api/v1/inbox/{code}", response_model=Inbox)
-def get_inbox_endpoint(code: str, request: Request, inbox: str = "personal") -> Inbox:
+@app.get("/api/v1/inbox", response_model=Inbox)
+def get_inbox_endpoint(request: Request, inbox: str = "personal") -> Inbox:
     """Get a student's inbox messages."""
-    student = get_active_student_by_code(code)
-    if not student:
-        ip = request.client.host if request.client else "unknown"
-        _record_code_failure(ip)
-        status = 429 if _rate_limited(ip) else 404
-        raise HTTPException(status_code=status, detail="Student not found")
+    student = authenticated_student()
     messages = get_inbox(student["id"], inbox)
     return Inbox(
         inbox=inbox,
@@ -2475,7 +2478,7 @@ async def perf_review_start(req: InterviewStartRequest) -> InterviewSession:
     app_data = get_application(req.application_id)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found")
-    if app_data.get("current_stage") != "placement":
+    if app_data.get("current_stage") not in ("placement", "mid_placement", "exit"):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -2726,6 +2729,7 @@ async def submit_task(
     attachment: UploadFile | None = File(None),
 ) -> TaskSubmitResult:
     _owned_task_or_404(task_id, code)
+    body = redact_contact_details(body[:50000])
     """Submit a work task. Runs the mentor reviewer, stores the outcome
     lazily-gated behind TASK_FEEDBACK_DELAY, and reveals the next task
     after TASK_NEXT_TASK_DELAY.
@@ -2737,7 +2741,8 @@ async def submit_task(
     now_iso = scheduling.to_iso(scheduling.now_utc())
     if not task.get("visible_at") or task["visible_at"] > now_iso:
         raise HTTPException(status_code=404, detail="Task not found")
-    if task["status"] not in ("assigned", "resubmit"):
+    task['status'] = _effective_task_status(task)
+    if task["status"] not in ("assigned", "resubmit", "failed"):
         raise HTTPException(
             status_code=400,
             detail=f"Task cannot be submitted in status '{task['status']}'",
@@ -2749,14 +2754,16 @@ async def submit_task(
     if attachment is not None:
         pdf_bytes = await attachment.read()
         if pdf_bytes:
-            attachment_filename = attachment.filename
+            attachment_filename = 'submission.pdf'
             try:
-                attachment_text = extract_text(pdf_bytes)
-            except Exception:  # noqa: BLE001
-                attachment_text = None
+                attachment_text = redact_contact_details(extract_text(pdf_bytes))
+            except HTTPException:
+                raise
 
     application_id = task["application_id"]
     app_data = get_application(application_id) or {}
+    if app_data.get('status') not in ('active', 'hired'):
+        raise HTTPException(400, 'This placement is closed.')
     job = get_job(app_data.get("company_slug", ""), app_data.get("job_slug", "")) or {}
     mentor_persona = job.get("manager_persona", "") or ""
     company_name = job.get("company", "")
@@ -2814,8 +2821,12 @@ async def submit_task(
     # Reveal the next task (with its own small delay) — this normally
     # lands BEFORE the feedback email, so the student starts the new
     # task before the mentor's notes on the prior one arrive.
-    next_revealed = reveal_next_task_after_submission(application_id)
-    is_final_task = next_revealed is None
+    next_revealed = reveal_next_task_after_submission(application_id) if outcome == 'passed' else None
+    all_tasks = list_tasks_for_application(application_id, only_visible=False)
+    is_final_task = bool(all_tasks) and all(
+        (get_latest_submission(t['id']) or {}).get('review_status') == 'passed'
+        for t in all_tasks
+    )
 
     # Schedule the mentor's feedback email (lazy-delivered via deliver_at)
     student = get_student_by_id(app_data.get("student_id", 0))
@@ -2827,6 +2838,8 @@ async def submit_task(
                 "getting through them. I'll be in touch about the wrap-up "
                 "conversation shortly."
             )
+        elif outcome in ('resubmit', 'failed'):
+            closing_line = 'Please revise this submission using the feedback, then submit it again.'
         else:
             closing_line = (
                 "Take these notes on board and carry them into your next "
@@ -2892,7 +2905,7 @@ async def submit_task(
     # task submission. Drops a coaching invitation in the work inbox
     # pointing the student at the perf-review view in their portal.
     # Lazy-gated like the feedback message — they share a deliver_at.
-    if task.get("sequence") == 2 and student:
+    if task.get("sequence") == 2 and student and outcome == 'passed':
         try:
             perf_review_body = (
                 f"Hi {(student.get('display_name') or '').split()[0] if student.get('display_name') else 'there'},\n\n"

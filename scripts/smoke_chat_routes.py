@@ -9,10 +9,11 @@ import os
 import pathlib
 import subprocess
 import time
+import tempfile
 
-os.environ.setdefault("WORKREADY_DB", "/tmp/smoke_chat.db")
+_temp = tempfile.TemporaryDirectory(prefix='workready-chat-smoke-')
+os.environ['WORKREADY_DB'] = str(pathlib.Path(_temp.name) / 'smoke.db')
 os.environ.setdefault("LLM_PROVIDER", "stub")
-pathlib.Path(os.environ["WORKREADY_DB"]).unlink(missing_ok=True)
 
 from workready_api.db import (
     init_db, get_or_create_student, generate_codes, create_application, advance_stage,
@@ -54,11 +55,13 @@ try:
 
 
     # --- Test 1: POST /chat/send ---
+    login = httpx.post(f'{base}/api/v1/auth/login', json={'code': _code}).json()
+    headers = {'Authorization': 'Bearer ' + login['token']}
     r = httpx.post(f"{base}/api/v1/chat/send", json={
         "application_id": app_id,
         "character_slug": CHARACTER_SLUG,
         "content": "Hey Sam, quick question about task 1",
-    }, timeout=10)
+    }, headers=headers, timeout=10)
     assert r.status_code == 200, f"send failed: {r.status_code} {r.text}"
     result = r.json()
     assert result.get("flagged") is False
@@ -67,7 +70,7 @@ try:
 
     # --- Test 2: GET /chat/thread shows at least the student message ---
     time.sleep(1)
-    r = httpx.get(f"{base}/api/v1/chat/thread/{app_id}/{CHARACTER_SLUG}")
+    r = httpx.get(f"{base}/api/v1/chat/thread/{app_id}/{CHARACTER_SLUG}", headers=headers)
     assert r.status_code == 200, f"thread failed: {r.status_code} {r.text}"
     thread = r.json()
     student_msgs = [m for m in thread["messages"] if m["author"] == "student"]
@@ -95,5 +98,6 @@ try:
 finally:
     proc.terminate()
     proc.wait(timeout=5)
+    _temp.cleanup()
 
 print("\nOK: chat routes smoke passed")

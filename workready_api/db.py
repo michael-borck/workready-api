@@ -367,6 +367,7 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA secure_delete=ON")
     try:
         yield conn
         conn.commit()
@@ -403,12 +404,9 @@ def _normalize_code(code: str | None) -> str | None:
 
 
 def make_handle(code: str) -> str:
-    """Derive the student's fictional in-simulation mailbox from their code.
-
-    WR-4XKQ-9M2T → wr4xkq9m2t@student.workready.eduserver.au
-    Deterministic so the handle is stable across sessions.
-    """
-    local = code.replace("-", "").lower()
+    """Create an independent mailbox identifier, stored once on enrolment."""
+    # A public mailbox must never reveal the enrolment credential.
+    local = "candidate." + secrets.token_hex(6)
     return f"{local}@{HANDLE_DOMAIN}"
 
 
@@ -597,7 +595,7 @@ def get_or_create_student(code: str) -> dict[str, Any] | None:
     with get_db() as conn:
         cursor = conn.execute(
             "INSERT INTO students (code, handle, display_name, created_at) "
-            "VALUES (?, ?, NULL, ?)",
+            "VALUES (?, ?, NULL, ?) ON CONFLICT(code) DO NOTHING",
             (normalized, handle, now),
         )
         conn.execute(
@@ -605,15 +603,7 @@ def get_or_create_student(code: str) -> dict[str, Any] | None:
             "WHERE code = ?",
             (now, normalized),
         )
-        student_id = cursor.lastrowid
-    return {
-        "id": student_id,
-        "code": normalized,
-        "handle": handle,
-        "display_name": None,
-        "created_at": now,
-        "last_login_at": None,
-    }
+    return get_student_by_code(normalized)
 
 
 def mark_student_login(student_id: int) -> None:
@@ -687,8 +677,15 @@ def set_persona(student_id: int, name: str | None) -> dict[str, Any] | None:
     cleaned = (name or "").strip() or None
     if cleaned and len(cleaned) > 60:
         cleaned = cleaned[:60]
-    handle = derive_handle_from_name(cleaned, student_id) if cleaned else None
     with get_db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        handle = None
+        if cleaned:
+            base = (_slugify_name_local(cleaned) or f'candidate{student_id}')[:40]
+            handle, suffix = f'{base}@{HANDLE_DOMAIN}', 2
+            while conn.execute('SELECT 1 FROM students WHERE handle=? AND id!=?', (handle, student_id)).fetchone():
+                handle = f'{base}{suffix}@{HANDLE_DOMAIN}'
+                suffix += 1
         if cleaned and handle:
             conn.execute(
                 "UPDATE students SET display_name = ?, handle = ? WHERE id = ?",

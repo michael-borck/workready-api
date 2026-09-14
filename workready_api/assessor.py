@@ -12,6 +12,7 @@ Set LLM_PROVIDER env var to choose. Default: stub.
 from __future__ import annotations
 
 import json
+import re
 import os
 from typing import Any
 
@@ -103,8 +104,8 @@ def assess_stub(
     resume_lower = resume_text.lower()
     job_lower = job_description.lower()
 
-    job_keywords = {w for w in job_lower.split() if len(w) > 4}
-    resume_words = set(resume_lower.split())
+    job_keywords = {w for w in re.findall(r'[a-z0-9]+', job_lower) if len(w) > 4}
+    resume_words = set(re.findall(r'[a-z0-9]+', resume_lower))
     overlap = job_keywords & resume_words
     keyword_score = min(len(overlap) / max(len(job_keywords), 1) * 100, 100)
 
@@ -288,6 +289,9 @@ async def assess(
     job_description: str,
 ) -> AssessmentResult:
     """Assess a resume using the configured LLM provider."""
+    from workready_api.pdf import redact_contact_details
+    resume_text = redact_contact_details(resume_text)
+    cover_letter = redact_contact_details(cover_letter)
     provider = os.environ.get("LLM_PROVIDER", "stub").lower()
 
     if provider == "stub" or provider not in PROVIDERS:

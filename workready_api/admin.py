@@ -32,12 +32,14 @@ from workready_api.db import (
     get_stage_results,
     get_student_applications,
     get_student_by_code,
+    get_student_by_id,
     list_codes,
     record_stage_result,
     revoke_code,
     set_application_status,
 )
 from workready_api.jobs import get_job
+from workready_api.erasure import erase_student, cleanup_files, checkpoint_erasure
 
 
 ADMIN_TOKEN = os.environ.get("WORKREADY_ADMIN_TOKEN", "")
@@ -134,7 +136,7 @@ def list_students() -> dict:
 
 
 @router.get("/funnel")
-def cohort_funnel() -> dict:
+def cohort_funnel(cohort: str = 'default') -> dict:
     """Cohort funnel — where every student sits in the internship arc.
 
     One row per application bucketed by live stage, plus aggregate counters.
@@ -144,27 +146,31 @@ def cohort_funnel() -> dict:
     funnel = [{"key": s, "label": stage_label(s), "count": 0} for s in stages]
     completed = rejected = hired = 0
     with get_db() as conn:
-        students_total = conn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-        codes_total = conn.execute("SELECT COUNT(*) FROM codes").fetchone()[0]
+        students_total = conn.execute("SELECT COUNT(*) FROM students s JOIN codes c ON c.code=s.code WHERE c.cohort=?", (cohort,)).fetchone()[0]
+        codes_total = conn.execute("SELECT COUNT(*) FROM codes WHERE cohort=?", (cohort,)).fetchone()[0]
         codes_redeemed = conn.execute(
-            "SELECT COUNT(*) FROM codes WHERE redeemed_at IS NOT NULL"
+            "SELECT COUNT(*) FROM codes WHERE redeemed_at IS NOT NULL AND cohort=?", (cohort,)
         ).fetchone()[0]
         rows = conn.execute(
-            "SELECT current_stage, status, COUNT(*) AS n FROM applications "
-            "GROUP BY current_stage, status"
+            "SELECT a.current_stage, a.status, COUNT(*) AS n FROM applications a "
+            "JOIN students s ON s.id=a.student_id JOIN codes c ON c.code=s.code "
+            "WHERE c.cohort=? AND a.id=(SELECT MAX(b.id) FROM applications b WHERE b.student_id=a.student_id) "
+            "GROUP BY a.current_stage, a.status", (cohort,)
         ).fetchall()
         for r in rows:
             stage, status, n = r["current_stage"], r["status"], r["n"]
-            if status == "rejected":
+            if status in ("rejected", "resigned"):
                 rejected += n
             elif status == "completed" or stage == "completed":
                 completed += n
-            elif status == "hired" or stage in stages:
-                hired += n
+            elif status in ('hired', 'active') and stage in stages:
+                if status == 'hired':
+                    hired += n
                 for f in funnel:
                     if f["key"] == stage:
                         f["count"] += n
     return {
+        "cohort": cohort,
         "students": students_total,
         "codes": codes_total,
         "codes_redeemed": codes_redeemed,
@@ -201,11 +207,11 @@ def get_journey_report(application_id: int) -> dict:
     return report
 
 
-@router.get("/students/{code}")
-def get_student_dump(code: str) -> dict:
+@router.get("/students/{student_id}")
+def get_student_dump(student_id: int) -> dict:
     """Full state dump for a single student — applications, messages,
     bookings, interview sessions, stage results."""
-    student = get_student_by_code(code)
+    student = get_student_by_id(student_id)
     if not student:
         raise HTTPException(404, detail="Student not found")
 
@@ -285,18 +291,19 @@ def list_access_codes(
     return {"codes": codes, "total": len(codes)}
 
 
-@router.get("/codes/{code}")
-def get_access_code(code: str) -> dict:
+@router.post("/codes/inspect")
+def get_access_code(payload: dict) -> dict:
     """Inspect a single code — active state, redemption, cohort, note."""
-    row = get_code(code)
+    row = get_code(str(payload.get('code', '')))
     if not row:
         raise HTTPException(404, detail="Code not found")
     return row
 
 
-@router.post("/codes/{code}/revoke")
-def revoke_access_code(code: str) -> dict:
+@router.post("/codes/revoke")
+def revoke_access_code(payload: dict) -> dict:
     """Deactivate a code. Its student can no longer sign in."""
+    code = str(payload.get('code', ''))
     if not revoke_code(code):
         raise HTTPException(404, detail="Active code not found")
     return {"code": code.upper(), "active": False}
@@ -307,69 +314,46 @@ def revoke_access_code(code: str) -> dict:
 # ============================================================
 
 
-@router.post("/students/{code}/reset")
-def reset_student(code: str) -> dict:
+@router.post("/students/{student_id}/reset")
+def reset_student(student_id: int) -> dict:
     """Wipe all applications, messages, bookings, sessions, and stage results
     for a student. Keeps the student record itself."""
-    student = get_student_by_code(code)
+    student = get_student_by_id(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
     sid = student["id"]
-    with get_db() as conn:
-        # Cascade: stage_results → interview_sessions → bookings →
-        # messages → applications. Foreign keys point to applications,
-        # so kill the children first.
-        app_ids = [
-            r[0]
-            for r in conn.execute(
-                "SELECT id FROM applications WHERE student_id = ?", (sid,)
-            ).fetchall()
-        ]
-        for aid in app_ids:
-            conn.execute("DELETE FROM stage_results WHERE application_id = ?", (aid,))
-            conn.execute(
-                "DELETE FROM interview_sessions WHERE application_id = ?", (aid,)
-            )
-            conn.execute(
-                "DELETE FROM interview_bookings WHERE application_id = ?", (aid,)
-            )
-        conn.execute("DELETE FROM messages WHERE student_id = ?", (sid,))
-        conn.execute("DELETE FROM applications WHERE student_id = ?", (sid,))
-    return {"student_id": sid, "applications_removed": len(app_ids)}
+    return erase_student(student, delete_identity=False)
 
 
-@router.delete("/students/{code}")
-def delete_student(code: str) -> dict:
-    """Hard-delete a student and all related data. The access code stays
-    active — revoke it separately if it should not be reusable."""
-    student = get_student_by_code(code)
+@router.delete("/students/{student_id}")
+def delete_student(student_id: int) -> dict:
+    """Erase a student's records/files and revoke the enrolment code."""
+    student = get_student_by_id(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
-    sid = student["id"]
+    return erase_student(student, delete_identity=True)
+
+
+@router.post('/erasure/retry')
+def retry_erasure_files():
+    return {'files_pending_cleanup': cleanup_files(), 'wal_checkpoint_pending': checkpoint_erasure()}
+
+
+@router.post('/cohorts/{cohort}/purge-expired')
+def purge_expired_cohort(cohort: str):
+    """Operator-triggered retention purge. Schedule this endpoint daily if required."""
+    from datetime import timedelta
+    days = max(1, int(os.environ.get('RETENTION_DAYS', '120')))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     with get_db() as conn:
-        # Children first
-        app_ids = [
-            r[0]
-            for r in conn.execute(
-                "SELECT id FROM applications WHERE student_id = ?", (sid,)
-            ).fetchall()
-        ]
-        for aid in app_ids:
-            conn.execute("DELETE FROM stage_results WHERE application_id = ?", (aid,))
-            conn.execute(
-                "DELETE FROM interview_sessions WHERE application_id = ?", (aid,)
-            )
-            conn.execute(
-                "DELETE FROM interview_bookings WHERE application_id = ?", (aid,)
-            )
-        conn.execute("DELETE FROM messages WHERE student_id = ?", (sid,))
-        conn.execute("DELETE FROM applications WHERE student_id = ?", (sid,))
-        conn.execute("DELETE FROM students WHERE id = ?", (sid,))
-    return {"deleted": True, "code": student["code"]}
+        expired = conn.execute('''SELECT s.* FROM students s JOIN codes c ON c.code=s.code
+            WHERE c.cohort=? AND COALESCE(s.last_login_at, s.created_at) < ?''', (cohort, cutoff)).fetchall()
+    results = [erase_student(dict(row), delete_identity=True) for row in expired]
+    return {'cohort': cohort, 'erased': len(results), 'files_pending_cleanup': cleanup_files(), 'cutoff': cutoff}
 
 
-@router.post("/students/{code}/state")
-def force_state(code: str, payload: dict) -> dict:
+@router.post("/students/{student_id}/state")
+def force_state(student_id: int, payload: dict) -> dict:
     """Force a student into a specific simulation state.
 
     Payload:
@@ -384,7 +368,7 @@ def force_state(code: str, payload: dict) -> dict:
     requested stage. Any existing active applications for this student
     are first marked 'rejected' to keep state coherent.
     """
-    student = get_student_by_code(code)
+    student = get_student_by_id(student_id)
     if not student:
         raise HTTPException(404, "Student not found — create one first")
 
@@ -468,6 +452,8 @@ def force_outcome(application_id: int, payload: dict) -> dict:
         record_stage_result(application_id, "interview", "passed", score=85)
         advance_stage(application_id, "placement")
         set_application_status(application_id, "active")
+        from workready_api.placement import activate_work_placement
+        activate_work_placement(application_id, _now())
     elif outcome == "interview_fail":
         record_stage_result(application_id, "interview", "failed", score=35)
         set_application_status(application_id, "rejected")
@@ -477,10 +463,10 @@ def force_outcome(application_id: int, payload: dict) -> dict:
     return {"application_id": application_id, "outcome": outcome}
 
 
-@router.post("/students/{code}/deliver-pending")
-def deliver_pending_messages(code: str) -> dict:
+@router.post("/students/{student_id}/deliver-pending")
+def deliver_pending_messages(student_id: int) -> dict:
     """Flush all delayed messages for a student — set deliver_at = now()."""
-    student = get_student_by_code(code)
+    student = get_student_by_id(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
     now = _now()
@@ -493,11 +479,11 @@ def deliver_pending_messages(code: str) -> dict:
         return {"flushed": cursor.rowcount}
 
 
-@router.post("/students/{code}/note")
-def post_admin_note(code: str, payload: dict) -> dict:
+@router.post("/students/{student_id}/note")
+def post_admin_note(student_id: int, payload: dict) -> dict:
     """Inject a system message into the student's inbox — useful for
     smoke-testing inbox rendering and the unread badge."""
-    student = get_student_by_code(code)
+    student = get_student_by_id(student_id)
     if not student:
         raise HTTPException(404, "Student not found")
     subject = payload.get("subject") or "Admin test message"

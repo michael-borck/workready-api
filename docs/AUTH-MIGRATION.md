@@ -1,5 +1,10 @@
 # Auth Migration Plan — Email Identity → Contractor Codes
 
+> Historical design plan. The current implementation uses opaque expiring
+> sessions stored as hashes, rather than JWTs. See `workready_api/auth.py`,
+> the API README and `workready-deploy/PRIVACY-RELEASE.md`. Do not treat older
+> privacy guarantees or endpoint examples below as the current contract.
+
 > Goal: remove all real-world PII from the system. Students authenticate with an
 > issued access code ("contractor code"); the code→student mapping lives only in
 > the lecturer's own records (LMS/spreadsheet), never on this server.

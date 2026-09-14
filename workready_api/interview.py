@@ -151,6 +151,9 @@ async def chat_completion(
     - LLM_MODEL: model name
     - provider-specific keys
     """
+    from workready_api.pdf import redact_contact_details
+    system_prompt = redact_contact_details(system_prompt)
+    messages = [{**m, 'content': redact_contact_details(m.get('content', ''))} for m in messages]
     provider = os.environ.get("LLM_PROVIDER", "stub").lower()
 
     if provider == "stub":
@@ -192,6 +195,7 @@ def _stub_reply(messages: list[dict]) -> str:
 
 
 async def _anthropic_chat(system_prompt: str, messages: list[dict]) -> str:
+    system_prompt, messages = _filtered_chat(system_prompt, messages)
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     model = os.environ.get("LLM_MODEL", "claude-sonnet-4-20250514")
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -214,6 +218,7 @@ async def _anthropic_chat(system_prompt: str, messages: list[dict]) -> str:
 
 
 async def _openrouter_chat(system_prompt: str, messages: list[dict]) -> str:
+    system_prompt, messages = _filtered_chat(system_prompt, messages)
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     model = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4")
     full_messages = [{"role": "system", "content": system_prompt}] + messages
@@ -235,6 +240,7 @@ async def _openrouter_chat(system_prompt: str, messages: list[dict]) -> str:
 
 
 async def _ollama_chat(system_prompt: str, messages: list[dict]) -> str:
+    system_prompt, messages = _filtered_chat(system_prompt, messages)
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     model = os.environ.get("LLM_MODEL", "llama3.2")
     api_key = os.environ.get("OLLAMA_API_KEY", "")
@@ -250,6 +256,14 @@ async def _ollama_chat(system_prompt: str, messages: list[dict]) -> str:
         )
         resp.raise_for_status()
     return resp.json()["message"]["content"].strip()
+
+
+def _filtered_chat(system_prompt: str, messages: list[dict]) -> tuple[str, list[dict]]:
+    from workready_api.pdf import redact_contact_details
+    return redact_contact_details(system_prompt), [
+        {**message, 'content': redact_contact_details(message.get('content', ''))}
+        for message in messages
+    ]
 
 
 # --- Final assessment ---
