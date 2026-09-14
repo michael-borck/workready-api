@@ -1,5 +1,7 @@
 # Team Communications Layer 3 — Implementation Plan
 
+> Historical April 2026 implementation plan. Old code, migrations and checkboxes below are not a current release checklist. See the [archive index](../../README.md), [API README](../../../README.md) and [current architecture](https://github.com/michael-borck/workready-deploy/blob/main/docs/architecture.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add the in-simulation team-communications subsystem to WorkReady — team directory, live per-character chat, task-aware replies, business-hours and presence gating, public holiday awareness, and a comms-monitor classifier that bounces inappropriate student messages with in-character coaching.

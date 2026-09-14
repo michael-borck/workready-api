@@ -1,5 +1,7 @@
 # Portal Sidebar Restructure + Teams-like UX
 
+> Historical April 2026 UI design. The status below records that design period. See the [archive index](../../README.md) and [current portal guide](https://github.com/michael-borck/workready-portal/blob/main/README.md) before changing the interface.
+
 **Date:** 2026-04-16
 **Status:** Approved for implementation
 **Repo:** workready-portal (frontend only — no API changes)

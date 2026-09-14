@@ -1,5 +1,7 @@
 # WorkReady Team Communications — Future Work
 
+> Historical April 2026 ideas, not a committed schedule or a current backlog. Some surrounding implementation has since changed. See the [archive index](../../README.md) and [current implementation limits](https://github.com/michael-borck/workready-deploy/blob/main/docs/architecture.md#limits-and-extension-points).
+
 Companion to `2026-04-14-workready-team-communications-design.md`.
 
 This document captures non-trivial tangents raised during the brainstorming

@@ -1,5 +1,7 @@
 # Portal Sidebar Restructure + Teams-like UX — Implementation Plan
 
+> Historical April 2026 implementation plan. Do not replace current session-aware frontend code with these examples. See the [archive index](../../README.md) and [current portal guide](https://github.com/michael-borck/workready-portal/blob/main/README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Restructure the portal sidebar to collapse mail into a single section with progressive disclosure, replace the chat drawer with a full main-content Teams experience, and remove stage-gated nav buttons that should arrive through communication.

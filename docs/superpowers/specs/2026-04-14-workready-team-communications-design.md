@@ -1,5 +1,7 @@
 # WorkReady Team Communications — Design
 
+> Historical April 2026 specification. Status and examples below describe that design period, not the current release. Start with the [archive index](../../README.md) and [current architecture](https://github.com/michael-borck/workready-deploy/blob/main/docs/architecture.md).
+
 **Date:** 2026-04-14
 **Author:** Michael Borck (brainstormed with Claude Opus 4.6)
 **Status:** Design — pending implementation plan

@@ -1,5 +1,7 @@
 # Hiring Desk AnythingLLM Integration — Implementation Plan
 
+> Historical April 2026 implementation plan. Do not rerun its commands as a current deployment procedure. Sensitive application/staff pages now exclude external widgets. See the [archive index](../../README.md) and [current hiring-desk configuration](https://github.com/michael-borck/workready-deploy/blob/main/docs/configuration.md#browser-origins-and-optional-hiring-desks).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Provision the public hiring desk chatbot on AnythingLLM at `chat.eduserver.au` for all 6 companies, harden `setup-chatbots.py` so it's namespace-safe and non-destructive, embed the chat widget on every company's careers page, and verify end-to-end on at least one live company site.

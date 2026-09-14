@@ -1,4 +1,6 @@
-# WorkReady — Stages 4, 5, 6 Design
+# Historical design for stages 4, 5 and 6
+
+> April 2026 design, retained for teaching rationale. Some features below were not implemented, including bonus-task generation. Current runtime templates come from JSON exports; coaching is tied to the second passed task, and all assigned tasks must pass before exit. Use the [current architecture](https://github.com/michael-borck/workready-deploy/blob/main/docs/architecture.md) and [configuration guide](https://github.com/michael-borck/workready-deploy/blob/main/docs/configuration.md). See the [archive index](docs/README.md) for related plans.
 
 Captured 2026-04-13. This document is the design reference for the
 remaining simulation stages. Build order: 4a → 4b → 4c → 5 → 6.
